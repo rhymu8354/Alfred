@@ -1,0 +1,24 @@
+☐ Establish Permissions: @created(2020-05-15 00:14)
+    * Read data
+    * Read metadata
+    * Write data
+    * Write metadata
+    * Create (includes pushing, unshifting)
+    * Delete (includes shifting, popping)
+☐ Establish the service @created(2020-04-27 17:06)
+☐ Use OIDC Code flow to get (and refresh) OAuth token @created(2020-04-27 22:06)
+☐ Interact with Twitch pub/sub to receive events @created(2020-04-27 22:03)
+    ☐ Bits @created(2020-04-27 22:13)
+    ☐ Channel points redemption @created(2020-04-27 22:13)
+    ☐ Subscription @created(2020-04-27 22:14)
+☐ Interact with Twitch webhooks to receive events @created(2020-04-27 22:03)
+    ☐ New followers @created(2020-04-27 22:54)
+    ☐ Stream start/stop @created(2020-04-27 22:03)
+    ☐ Moderator added @created(2020-04-27 22:04)
+    ☐ Moderator removed @created(2020-04-27 22:04)
+☐ Interact with Twitch chat to receive events @created(2020-04-27 22:03)
+    ☐ Hosts @created(2020-04-27 22:03)
+    ☐ Raids @created(2020-04-27 22:03)
+    ☐ VIP added/removed @created(2020-04-27 22:04)
+        NOTE: The only way it seems this can be detected is when people actually chat, and looking at their badges to see if they have the VIP badge.
+☐ Exchange of Twitch JWT for token @created(2020-04-27 22:01)
