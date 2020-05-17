@@ -41,9 +41,12 @@ namespace {
         const std::string& path,
         size_t offset = 0
     ) {
-        const auto delimiter = path.find('.', offset);
-        if (delimiter == std::string::npos) {
+        if (offset >= path.length()) {
             return root;
+        }
+        auto delimiter = path.find('.', offset);
+        if (delimiter == std::string::npos) {
+            delimiter = path.length();
         }
         const auto key = path.substr(offset, delimiter - offset);
         if (root.Has("data")) {

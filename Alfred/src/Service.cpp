@@ -4,6 +4,7 @@
  * This module contains the implementation of the Service class.
  */
 
+#include "LoadFile.hpp"
 #include "Service.hpp"
 #include "Store.hpp"
 #include "TimeKeeper.hpp"
@@ -21,6 +22,7 @@
 #include <SystemAbstractions/DiagnosticsStreamReporter.hpp>
 #include <SystemAbstractions/File.hpp>
 #include <time.h>
+#include <TlsDecorator/TlsDecorator.hpp>
 
 namespace {
 
@@ -298,10 +300,43 @@ struct Service::Impl
         httpDeps.timeKeeper = std::make_shared< TimeKeeper >();
         auto transport = std::make_shared< HttpNetworkTransport::HttpServerNetworkTransport >();
         transport->SubscribeToDiagnostics(diagnosticsSender.Chain(), 0);
+        const auto configuration = store.GetData("Configuration");
+        std::string cert, key;
+        auto certPath = (std::string)configuration["SslCertificate"];
+        if (!SystemAbstractions::File::IsAbsolutePath(certPath)) {
+            certPath = SystemAbstractions::File::GetExeParentDirectory() + "/" + certPath;
+        }
+        if (!LoadFile(certPath, "SSL certificate", diagnosticsSender, cert)) {
+            return false;
+        }
+        auto keyPath = (std::string)configuration["SslKey"];
+        if (!SystemAbstractions::File::IsAbsolutePath(keyPath)) {
+            keyPath = SystemAbstractions::File::GetExeParentDirectory() + "/" + keyPath;
+        }
+        if (!LoadFile(keyPath, "SSL private key", diagnosticsSender, key)) {
+            return false;
+        }
+        const auto passphrase = (std::string)configuration["SslKeyPassphrase"];
+        const auto connectionDecoratorFactory = [
+            cert,
+            key,
+            passphrase
+        ](
+            std::shared_ptr< SystemAbstractions::INetworkConnection > connection
+        ){
+            const auto tlsDecorator = std::make_shared< TlsDecorator::TlsDecorator >();
+            tlsDecorator->ConfigureAsServer(
+                connection,
+                cert,
+                key,
+                passphrase
+            );
+            return tlsDecorator;
+        };
+        transport->SetConnectionDecoratorFactory(connectionDecoratorFactory);
         httpDeps.transport = transport;
         httpServer.SetConfigurationItem("Port", "8100");
         httpServer.SetConfigurationItem("TooManyRequestsThreshold", "0.0");
-        const auto configuration = store.GetData("Configuration");
         const auto& httpConfig = configuration["Http"];
         if (httpConfig.GetType() == Json::Value::Type::Object) {
             for (const auto keyValue: httpConfig) {
