@@ -4,9 +4,13 @@ cmake_minimum_required(VERSION 3.8)
 set(This Alfred)
 
 set(Sources
+    src/LoadFile.cpp
+    src/LoadFile.hpp
     src/main.cpp
     src/Service.cpp
     src/Service.hpp
+    src/Store.cpp
+    src/Store.hpp
     src/TimeKeeper.cpp
     src/TimeKeeper.hpp
 )

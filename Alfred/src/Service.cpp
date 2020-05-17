@@ -5,6 +5,7 @@
  */
 
 #include "Service.hpp"
+#include "Store.hpp"
 #include "TimeKeeper.hpp"
 
 #include <AsyncData/Dispatcher.hpp>
@@ -29,10 +30,9 @@ namespace {
      */
     struct Environment {
         /**
-         * This is the path to the configuration file to use when
-         * configuring Alfred.
+         * This is the path to the store file to use for Alfred.
          */
-        std::string configFilePath;
+        std::string storeFilePath;
 
         /**
          * This is the path to the file to which to write diagnostic messages
@@ -53,212 +53,11 @@ namespace {
         size_t diagnosticReportingThreshold = 2;
     };
 
-    /**
-     * This function configures and starts the web client.
-     *
-     * @param[in,out] http
-     *     This is the web client to configure and start.
-     *
-     * @param[in] timeKeeper
-     *     This is the object to be used to track time in the web client.
-     *
-     * @param[in] configuration
-     *     This holds all of the configuration items for the entire system.
-     *
-     * @param[in] environment
-     *     This contains variables set through the operating system
-     *     environment or the command-line arguments.
-     *
-     * @param[in] diagnosticsSender
-     *     This is the object to use to publish any diagnostic messages.
-     *
-     * @return
-     *     An indication of whether or not the function succeeded is returned.
-     */
-    bool ConfigureAndStartHttpClient(
-        Http::Client& http,
-        std::shared_ptr< TimeKeeper > timeKeeper,
-        const Json::Value& configuration,
-        const Environment& environment,
-        const SystemAbstractions::DiagnosticsSender& diagnosticsSender
-    ) {
-        auto clientTransport = std::make_shared< HttpNetworkTransport::HttpClientNetworkTransport >();
-        clientTransport->SubscribeToDiagnostics(
-            diagnosticsSender.Chain(),
-            environment.diagnosticReportingThreshold
-        );
-        Http::Client::MobilizationDependencies httpClientDeps;
-        httpClientDeps.timeKeeper = timeKeeper;
-        httpClientDeps.transport = clientTransport;
-        httpClientDeps.requestTimeoutSeconds = configuration["RequestTimeoutSeconds"];
-        http.Mobilize(httpClientDeps);
-        return true;
-    }
-
-    /**
-     * This function configures and starts the web server.
-     *
-     * @param[in,out] http
-     *     This is the web server to configure and start.
-     *
-     * @param[in] timeKeeper
-     *     This is the object to be used to track time in the web server.
-     *
-     * @param[in] configuration
-     *     This holds all of the configuration items for the entire system.
-     *
-     * @param[in] environment
-     *     This contains variables set through the operating system
-     *     environment or the command-line arguments.
-     *
-     * @param[in] diagnosticsSender
-     *     This is the object to use to publish any diagnostic messages.
-     *
-     * @return
-     *     An indication of whether or not the function succeeded is returned.
-     */
-    bool ConfigureAndStartHttpServer(
-        Http::Server& http,
-        const std::shared_ptr< TimeKeeper >& timeKeeper,
-        const Json::Value& configuration,
-        const Environment& environment,
-        const SystemAbstractions::DiagnosticsSender& diagnosticMessageSender
-    ) {
-        Http::Server::MobilizationDependencies httpDeps;
-        httpDeps.timeKeeper = std::make_shared< TimeKeeper >();
-        auto transport = std::make_shared< HttpNetworkTransport::HttpServerNetworkTransport >();
-        transport->SubscribeToDiagnostics(diagnosticMessageSender.Chain(), 0);
-        httpDeps.transport = transport;
-        http.SetConfigurationItem("Port", "8100");
-        http.SetConfigurationItem("TooManyRequestsThreshold", "0.0");
-        const auto& httpConfig = configuration["Http"];
-        if (httpConfig.GetType() == Json::Value::Type::Object) {
-            for (const auto keyValue: httpConfig) {
-                const auto& key = keyValue.key();
-                const auto& value = keyValue.value();
-                http.SetConfigurationItem(key, value);
-            }
-        }
-        return http.Mobilize(httpDeps);
-    }
-
     std::string FormatDateTime(double time) {
         char buffer[20];
         auto timeSeconds = (time_t)time;
         (void)strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", gmtime(&timeSeconds));
         return buffer;
-    }
-
-    /**
-     * This function loads the contents of the file with the given path
-     * into the given string.
-     *
-     * @param[in] filePath
-     *     This is the path of the file to load.
-     *
-     * @param[in] fileDescription
-     *     This is a description of the file being loaded, used in any
-     *     diagnostic messages published by the function.
-     *
-     * @param[in] diagnosticsSender
-     *     This is the object to use to publish any diagnostic messages.
-     *
-     * @param[out] fileContents
-     *     This is where to store the file's contents.
-     *
-     * @return
-     *     An indication of whether or not the function succeeded is returned.
-     */
-    bool LoadFile(
-        const std::string& filePath,
-        const std::string& fileDescription,
-        const SystemAbstractions::DiagnosticsSender& diagnosticsSender,
-        std::string& fileContents
-    ) {
-        SystemAbstractions::File file(filePath);
-        if (
-            !file.IsDirectory()
-            && file.OpenReadOnly()
-        ) {
-            std::vector< uint8_t > fileContentsAsVector(file.GetSize());
-            if (file.Read(fileContentsAsVector) != fileContentsAsVector.size()) {
-                diagnosticsSender.SendDiagnosticInformationFormatted(
-                    SystemAbstractions::DiagnosticsSender::Levels::ERROR,
-                    "Unable to read %s file '%s'",
-                    fileDescription.c_str(),
-                    filePath.c_str()
-                );
-                return false;
-            }
-            (void)fileContents.assign(
-                (const char*)fileContentsAsVector.data(),
-                fileContentsAsVector.size()
-            );
-        } else {
-            diagnosticsSender.SendDiagnosticInformationFormatted(
-                SystemAbstractions::DiagnosticsSender::Levels::ERROR,
-                "Unable to open %s file '%s'",
-                fileDescription.c_str(),
-                filePath.c_str()
-            );
-            return false;
-        }
-        return true;
-    }
-
-    /**
-     * This function opens and reads the server's configuration file,
-     * returning it.  The configuration is formatted as a JSON object.
-     *
-     * @param[in] environment
-     *     This contains variables set through the operating system
-     *     environment or the command-line arguments.
-     *
-     * @param[in] diagnosticsSender
-     *     This is the object to use to publish any diagnostic messages.
-     *
-     * @return
-     *     The server's configuration is returned as a JSON object.
-     */
-    Json::Value ReadConfiguration(
-        const Environment& environment,
-        const SystemAbstractions::DiagnosticsSender& diagnosticsSender
-    ) {
-        // Start with a default configuration, to be used if there are any
-        // issues reading the actual configuration file.
-        Json::Value configuration(Json::Value::Type::Object);
-
-        // Attempt to load configuration file from various paths.
-        std::vector< std::string > possibleConfigFilePaths = {
-            SystemAbstractions::File::GetExeParentDirectory() + "/config.json",
-            "config.json",
-        };
-        if (!environment.configFilePath.empty()) {
-            possibleConfigFilePaths.insert(
-                possibleConfigFilePaths.begin(),
-                environment.configFilePath
-            );
-        }
-        for (const auto& possibleConfigFilePath: possibleConfigFilePaths) {
-            std::string encodedConfig;
-            if (
-                LoadFile(
-                    possibleConfigFilePath,
-                    "configuration",
-                    diagnosticsSender,
-                    encodedConfig
-                )
-            ) {
-                configuration = Json::Value::FromEncoding(encodedConfig);
-                diagnosticsSender.SendDiagnosticInformationFormatted(
-                    3,
-                    "Loaded configuration from file '%s'",
-                    possibleConfigFilePath.c_str()
-                );
-                break;
-            }
-        }
-        return configuration;
     }
 
     void RegisterTestResource(
@@ -289,12 +88,21 @@ namespace {
      *
      * @param[in] value
      *     This is the JSON value to encode and write to the file.
+     *
+     * @param[in] diagnosticsSender
+     *     This is the object to use to publish any diagnostic messages.
      */
     void WriteJsonToFile(
         SystemAbstractions::File& file,
-        const Json::Value& value
+        const Json::Value& value,
+        const SystemAbstractions::DiagnosticsSender& diagnosticsSender
     ) {
         if (!file.OpenReadWrite()) {
+            diagnosticsSender.SendDiagnosticInformationFormatted(
+                SystemAbstractions::DiagnosticsSender::Levels::ERROR,
+                "unable to open file \"%s\" for writing",
+                file.GetPath().c_str()
+            );
             return;
         }
         Json::EncodingOptions jsonEncodingOptions;
@@ -305,8 +113,24 @@ namespace {
             encoding.begin(),
             encoding.end()
         );
-        (void)file.Write(buffer);
-        (void)file.SetSize(buffer.size());
+        if (file.Write(buffer) != buffer.size()) {
+            diagnosticsSender.SendDiagnosticInformationFormatted(
+                SystemAbstractions::DiagnosticsSender::Levels::ERROR,
+                "unable to write to file \"%s\"",
+                file.GetPath().c_str()
+            );
+            file.Close();
+            return;
+        }
+        if (!file.SetSize(buffer.size())) {
+            diagnosticsSender.SendDiagnosticInformationFormatted(
+                SystemAbstractions::DiagnosticsSender::Levels::ERROR,
+                "unable to set size of file \"%s\"",
+                file.GetPath().c_str()
+            );
+            file.Close();
+            return;
+        }
         file.Close();
     }
 
@@ -320,13 +144,13 @@ namespace {
                 "Usage: Alfred [options]\n"
                 "\n"
                 "Launch Alfred, attached to the terminal\n"
-                "unless -s or --service is specified.\n"
+                "unless -d or --daemon is specified.\n"
                 "\n"
                 "Options:\n"
-                "  -c|--config PATH\n"
+                "  -s|--store PATH\n"
                 "    Use configuration saved in the file at the given PATH.\n"
-                "  -s|--service\n"
-                "    Run Alfred as a service, rather than directly\n"
+                "  -d|--daemon\n"
+                "    Run Alfred as a daemon, rather than directly\n"
                 "    in the terminal.  (NOTE: requires separate OS-specific installation steps.)\n"
             )
         );
@@ -363,9 +187,10 @@ struct Service::Impl
     // Properties
 
     /**
-     * This holds the current configuration of the service.
+     * This holds all of the information managed by the service, along
+     * with its metadata.
      */
-    Json::Value configuration;
+    Store store;
 
     /**
      * This is used to publish diagnostic messages generated by the service
@@ -423,9 +248,89 @@ struct Service::Impl
     Impl()
         : diagnosticsSender("Alfred")
     {
+        (void)store.SubscribeToDiagnostics(diagnosticsSender.Chain());
     }
 
     // Methods
+
+    /**
+     * This function configures and starts the web client.
+     */
+    bool ConfigureAndStartHttpClient() {
+        auto clientTransport = std::make_shared< HttpNetworkTransport::HttpClientNetworkTransport >();
+        clientTransport->SubscribeToDiagnostics(
+            diagnosticsSender.Chain(),
+            environment.diagnosticReportingThreshold
+        );
+        Http::Client::MobilizationDependencies httpClientDeps;
+        httpClientDeps.timeKeeper = timeKeeper;
+        httpClientDeps.transport = clientTransport;
+        const auto configuration = store.GetData("Configuration");
+        httpClientDeps.requestTimeoutSeconds = configuration["RequestTimeoutSeconds"];
+        httpClient.Mobilize(httpClientDeps);
+        return true;
+    }
+
+    /**
+     * This function configures and starts the web server.
+     *
+     * @param[in,out] http
+     *     This is the web server to configure and start.
+     *
+     * @param[in] timeKeeper
+     *     This is the object to be used to track time in the web server.
+     *
+     * @param[in] configuration
+     *     This holds all of the configuration items for the entire system.
+     *
+     * @param[in] environment
+     *     This contains variables set through the operating system
+     *     environment or the command-line arguments.
+     *
+     * @param[in] diagnosticsSender
+     *     This is the object to use to publish any diagnostic messages.
+     *
+     * @return
+     *     An indication of whether or not the function succeeded is returned.
+     */
+    bool ConfigureAndStartHttpServer() {
+        Http::Server::MobilizationDependencies httpDeps;
+        httpDeps.timeKeeper = std::make_shared< TimeKeeper >();
+        auto transport = std::make_shared< HttpNetworkTransport::HttpServerNetworkTransport >();
+        transport->SubscribeToDiagnostics(diagnosticsSender.Chain(), 0);
+        httpDeps.transport = transport;
+        httpServer.SetConfigurationItem("Port", "8100");
+        httpServer.SetConfigurationItem("TooManyRequestsThreshold", "0.0");
+        const auto configuration = store.GetData("Configuration");
+        const auto& httpConfig = configuration["Http"];
+        if (httpConfig.GetType() == Json::Value::Type::Object) {
+            for (const auto keyValue: httpConfig) {
+                const auto& key = keyValue.key();
+                const auto& value = keyValue.value();
+                httpServer.SetConfigurationItem(key, value);
+            }
+        }
+        return httpServer.Mobilize(httpDeps);
+    }
+
+    bool LoadStore() {
+        std::vector< std::string > possibleStoreFilePaths = {
+            SystemAbstractions::File::GetExeParentDirectory() + "/Alfred.json",
+            "Alfred.json",
+        };
+        if (!environment.storeFilePath.empty()) {
+            possibleStoreFilePaths.insert(
+                possibleStoreFilePaths.begin(),
+                environment.storeFilePath
+            );
+        }
+        for (const auto& possibleStoreFilePath: possibleStoreFilePaths) {
+            if (store.Mobilize(possibleStoreFilePath, timeKeeper)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /**
      * Create and return a delegate that will publish diagnostic messages
@@ -521,9 +426,9 @@ struct Service::Impl
             const std::string arg(argv[i]);
             switch (state) {
                 case 0: { // next option
-                    if ((arg == "-c") || (arg == "--config")) {
+                    if ((arg == "-s") || (arg == "--store")) {
                         state = 1;
-                    } else if ((arg == "-s") || (arg == "--service")) {
+                    } else if ((arg == "-d") || (arg == "--daemon")) {
                         environment.daemon = true;
                     } else if (arg.substr(0, 1) == "-") {
                         diagnosticsSender.SendDiagnosticInformationString(
@@ -539,15 +444,15 @@ struct Service::Impl
                     }
                 } break;
 
-                case 1: { // -c|--config
-                    if (!environment.configFilePath.empty()) {
+                case 1: { // -s|--store
+                    if (!environment.storeFilePath.empty()) {
                         diagnosticsSender.SendDiagnosticInformationString(
                             SystemAbstractions::DiagnosticsSender::Levels::ERROR,
-                            "multiple configuration file paths given"
+                            "multiple store file paths given"
                         );
                         return false;
                     }
-                    environment.configFilePath = arg;
+                    environment.storeFilePath = arg;
                     state = 0;
                 } break;
 
@@ -555,10 +460,10 @@ struct Service::Impl
             }
         }
         switch (state) {
-            case 1: { // -c|--config
+            case 1: { // -s|--store
                 diagnosticsSender.SendDiagnosticInformationString(
                     SystemAbstractions::DiagnosticsSender::Levels::ERROR,
-                    "configuration file path expected"
+                    "store file path expected"
                 );
             } return false;
 
@@ -603,27 +508,11 @@ struct Service::Impl
             diagnosticsSender.Chain(),
             environment.diagnosticReportingThreshold
         );
-        if (
-            !ConfigureAndStartHttpServer(
-                httpServer,
-                timeKeeper,
-                configuration,
-                environment,
-                diagnosticsSender
-            )
-        ) {
+        if (!ConfigureAndStartHttpServer()) {
             unsubscribeFromDiagnostics();
             return false;
         }
-        if (
-            !ConfigureAndStartHttpClient(
-                httpClient,
-                timeKeeper,
-                configuration,
-                environment,
-                diagnosticsSender
-            )
-        ) {
+        if (!ConfigureAndStartHttpClient()) {
             unsubscribeFromDiagnostics();
             return false;
         }
@@ -687,16 +576,16 @@ int Service::Main(int argc, char* argv[]) {
         PrintUsageInformation();
         return EXIT_FAILURE;
     }
-    impl_->configuration = ReadConfiguration(
-        impl_->environment,
-        impl_->diagnosticsSender
-    );
-    unsubscribeDiagnosticsDelegate();
-    if (impl_->configuration.Has("LogFile")) {
-        impl_->environment.logFilePath = (std::string)impl_->configuration["LogFile"];
+    if (!impl_->LoadStore()) {
+        return EXIT_FAILURE;
     }
-    if (impl_->configuration.Has("DiagnosticReportingThreshold")) {
-        impl_->environment.diagnosticReportingThreshold = (size_t)impl_->configuration["DiagnosticReportingThreshold"];
+    unsubscribeDiagnosticsDelegate();
+    const auto configuration = impl_->store.GetData("Configuration");
+    if (configuration.Has("LogFile")) {
+        impl_->environment.logFilePath = (std::string)configuration["LogFile"];
+    }
+    if (configuration.Has("DiagnosticReportingThreshold")) {
+        impl_->environment.diagnosticReportingThreshold = (size_t)configuration["DiagnosticReportingThreshold"];
     }
     if (impl_->environment.daemon) {
         std::shared_ptr< FILE > logFile(
