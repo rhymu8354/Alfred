@@ -687,11 +687,11 @@ int Service::Main(int argc, char* argv[]) {
         PrintUsageInformation();
         return EXIT_FAILURE;
     }
-    unsubscribeDiagnosticsDelegate();
     impl_->configuration = ReadConfiguration(
         impl_->environment,
         impl_->diagnosticsSender
     );
+    unsubscribeDiagnosticsDelegate();
     if (impl_->configuration.Has("LogFile")) {
         impl_->environment.logFilePath = (std::string)impl_->configuration["LogFile"];
     }
