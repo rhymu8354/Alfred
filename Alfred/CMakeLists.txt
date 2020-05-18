@@ -4,6 +4,8 @@ cmake_minimum_required(VERSION 3.8)
 set(This Alfred)
 
 set(Sources
+    src/ApiHttp.cpp
+    src/ApiHttp.hpp
     src/LoadFile.cpp
     src/LoadFile.hpp
     src/main.cpp
