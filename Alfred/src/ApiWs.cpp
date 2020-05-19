@@ -21,6 +21,14 @@
 namespace {
 
     struct Client {
+        // Types
+
+        using MessageHandler = void (Client::*)(
+            const std::shared_ptr< WebSockets::WebSocket >& ws,
+            const Json::Value& data,
+            const std::shared_ptr< Store >& store
+        );
+
         // Properties
 
         SystemAbstractions::DiagnosticsSender diagnosticsSender;
@@ -33,6 +41,20 @@ namespace {
         }
 
         // Methods
+
+        void OnGreeting(
+            const std::shared_ptr< WebSockets::WebSocket >& ws,
+            const Json::Value& message,
+            const std::shared_ptr< Store >& store
+        ) {
+            ws->SendText(Json::Object({
+                {"type", "Notice"},
+                {"message", StringExtensions::sprintf(
+                    "You said this: %s",
+                    message.ToEncoding().c_str()
+                )},
+            }).ToEncoding());
+        }
 
         void OnOpened() {
             diagnosticsSender.SendDiagnosticInformationString(
@@ -53,7 +75,7 @@ namespace {
             );
         }
 
-        void OnText(
+        bool OnText(
             const std::shared_ptr< WebSockets::WebSocket >& ws,
             const std::string& data,
             const std::shared_ptr< Store >& store
@@ -63,15 +85,42 @@ namespace {
                 "Received: \"%s\"",
                 data.c_str()
             );
-            ws->SendText(Json::Object({
-                {
-                    "message",
-                    StringExtensions::sprintf(
-                        "You said this: %s",
-                        data.c_str()
-                    )
-                },
-            }).ToEncoding());
+            const auto message = Json::Value::FromEncoding(data);
+            if (
+                (message.GetType() != Json::Value::Type::Object)
+                || !message.Has("type")
+            ) {
+                diagnosticsSender.SendDiagnosticInformationFormatted(
+                    SystemAbstractions::DiagnosticsSender::Levels::WARNING,
+                    "Malformed message received: \"%s\"",
+                    data.c_str()
+                );
+                ws->SendText(Json::Object({
+                    {"type", "Error"},
+                    {"message", "malformed message received"}
+                }).ToEncoding());
+                return false;
+            }
+            const auto messageType = (std::string)message["type"];
+            static const std::unordered_map< std::string, MessageHandler > messageHandlers{
+                {"Greeting", &Client::OnGreeting},
+            };
+            const auto messageHandler = messageHandlers.find(messageType);
+            if (messageHandler == messageHandlers.end()) {
+                ws->SendText(Json::Object({
+                    {"type", "Error"},
+                    {
+                        "message",
+                        StringExtensions::sprintf(
+                            "Unknown message type received: %s",
+                            messageType.c_str()
+                        )
+                    },
+                }).ToEncoding());
+            } else {
+                (this->*messageHandler->second)(ws, message, store);
+            }
+            return true;
         }
 
     };
@@ -108,7 +157,53 @@ struct ApiWs::Impl
 
     // Methods
 
-    Http::Response HandleWsRequest(
+    void CloseWebSocket(
+        const std::shared_ptr< WebSockets::WebSocket >& ws,
+        unsigned int code = 1005,
+        const std::string& reason = ""
+    ) {
+        ws->Close(code, reason);
+        const auto thisGeneration = generation;
+        const auto configuration = store->GetData("Configuration");
+        const auto webSocketCloseLinger = (double)configuration["WebSocketCloseLinger"];
+        std::weak_ptr< WebSockets::WebSocket > wsWeak(ws);
+        std::weak_ptr< Impl > implWeak(shared_from_this());
+        (void)scheduler->Schedule(
+            [
+                implWeak,
+                thisGeneration,
+                wsWeak
+            ]{
+                const auto ws = wsWeak.lock();
+                if (ws == nullptr) {
+                    return;
+                }
+                const auto impl = implWeak.lock();
+                if (impl == nullptr) {
+                    return;
+                }
+                std::lock_guard< decltype(impl->mutex) > lock(impl->mutex);
+                if (
+                    !impl->mobilized
+                    || (impl->generation != thisGeneration)
+                ) {
+                    return;
+                }
+                const auto clientsEntry = impl->clients.find(ws);
+                if (clientsEntry == impl->clients.end()) {
+                    return;
+                }
+                impl->diagnosticsSender.SendDiagnosticInformationString(
+                    0,
+                    "Dropping WebSocket"
+                );
+                impl->clients.erase(clientsEntry);
+            },
+            scheduler->GetClock()->GetCurrentTime() + webSocketCloseLinger
+        );
+    }
+
+    Http::Response HandleWebSocketRequest(
         const Http::Request& request,
         std::shared_ptr< Http::Connection > connection,
         const std::string& trailer,
@@ -202,56 +297,20 @@ struct ApiWs::Impl
             return;
         }
         clientsEntry->second->OnClosed(code, reason);
-        ws->Close(code, reason);
-        const auto thisGeneration = generation;
-        const auto configuration = store->GetData("Configuration");
-        const auto webSocketCloseLinger = (double)configuration["WebSocketCloseLinger"];
-        std::weak_ptr< WebSockets::WebSocket > wsWeak(ws);
-        std::weak_ptr< Impl > implWeak(shared_from_this());
-        (void)scheduler->Schedule(
-            [
-                implWeak,
-                thisGeneration,
-                wsWeak
-            ]{
-                const auto ws = wsWeak.lock();
-                if (ws == nullptr) {
-                    return;
-                }
-                const auto impl = implWeak.lock();
-                if (impl == nullptr) {
-                    return;
-                }
-                std::lock_guard< decltype(impl->mutex) > lock(impl->mutex);
-                if (
-                    !impl->mobilized
-                    || (impl->generation != thisGeneration)
-                ) {
-                    return;
-                }
-                const auto clientsEntry = impl->clients.find(ws);
-                if (clientsEntry == impl->clients.end()) {
-                    return;
-                }
-                impl->diagnosticsSender.SendDiagnosticInformationString(
-                    0,
-                    "Dropping WebSocket"
-                );
-                impl->clients.erase(clientsEntry);
-            },
-            scheduler->GetClock()->GetCurrentTime() + webSocketCloseLinger
-        );
+        CloseWebSocket(ws);
     }
 
     void OnWebSocketText(
         std::shared_ptr< WebSockets::WebSocket > ws,
         const std::string& data
     ) {
-        const auto clientsEntry = clients.find(ws);
+        auto clientsEntry = clients.find(ws);
         if (clientsEntry == clients.end()) {
             return;
         }
-        clientsEntry->second->OnText(ws, data, store);
+        if (!clientsEntry->second->OnText(ws, data, store)) {
+            CloseWebSocket(ws);
+        }
     }
 
 };
@@ -324,7 +383,7 @@ void ApiWs::Mobilize(
                 return response;
             }
             std::lock_guard< decltype(impl->mutex) > lock(impl->mutex);
-            return impl->HandleWsRequest(request, connection, trailer, configuration);
+            return impl->HandleWebSocketRequest(request, connection, trailer, configuration);
         }
     );
     ++impl_->generation;
