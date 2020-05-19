@@ -7,6 +7,7 @@
 
 #include "ApiWs.hpp"
 
+#include <functional>
 #include <Http/Server.hpp>
 #include <Json/Value.hpp>
 #include <memory>
@@ -20,46 +21,117 @@
 
 namespace {
 
-    struct Client {
+    struct Client
+        : public std::enable_shared_from_this< Client >
+    {
         // Types
 
+        using CloseDelegate = std::function<
+            void(
+                unsigned int code,
+                const std::string& reason
+            )
+        >;
+
         using MessageHandler = void (Client::*)(
-            const std::shared_ptr< WebSockets::WebSocket >& ws,
             const Json::Value& data,
-            const std::shared_ptr< Store >& store
+            std::unique_lock< std::mutex >& lock
         );
 
         // Properties
 
+        bool authenticated = false;
+        int authenticationTimeout = 0;
+        CloseDelegate closeDelegate;
         SystemAbstractions::DiagnosticsSender diagnosticsSender;
+        std::mutex mutex;
+        std::shared_ptr< Timekeeping::Scheduler > scheduler;
+        std::shared_ptr< Store > store;
+        std::weak_ptr< WebSockets::WebSocket > wsWeak;
 
         // Constructor
 
-        explicit Client(const std::string& peerId)
-            : diagnosticsSender(peerId)
+        Client(
+            const std::string& peerId,
+            const std::weak_ptr< WebSockets::WebSocket >& wsWeak,
+            const std::shared_ptr< Store >& store,
+            const std::shared_ptr< Timekeeping::Scheduler >& scheduler,
+            CloseDelegate closeDelegate
+        )
+            : closeDelegate(closeDelegate)
+            , diagnosticsSender(peerId)
+            , scheduler(scheduler)
+            , store(store)
+            , wsWeak(wsWeak)
         {
         }
 
         // Methods
 
+        void OnAuthenticationTimeout() {
+            std::unique_lock< decltype(mutex) > lock(mutex);
+            authenticationTimeout = 0;
+            if (authenticated) {
+                return;
+            }
+            diagnosticsSender.SendDiagnosticInformationString(
+                SystemAbstractions::DiagnosticsSender::Levels::WARNING,
+                "Authentication timeout"
+            );
+            const auto ws = wsWeak.lock();
+            if (ws != nullptr) {
+                ws->SendText(Json::Object({
+                    {"type", "Error"},
+                    {"message", "Authentication timeout"},
+                }).ToEncoding());
+            }
+            auto closeDelegateCopy = closeDelegate;
+            lock.unlock();
+            if (closeDelegateCopy) {
+                closeDelegateCopy(1005, "");
+            }
+        }
+
         void OnGreeting(
-            const std::shared_ptr< WebSockets::WebSocket >& ws,
             const Json::Value& message,
-            const std::shared_ptr< Store >& store
+            std::unique_lock< decltype(mutex) >& lock
         ) {
-            ws->SendText(Json::Object({
-                {"type", "Notice"},
-                {"message", StringExtensions::sprintf(
-                    "You said this: %s",
-                    message.ToEncoding().c_str()
-                )},
-            }).ToEncoding());
+            authenticated = true;
+            if (authenticationTimeout) {
+                scheduler->Cancel(authenticationTimeout);
+                authenticationTimeout = 0;
+            }
+            const auto ws = wsWeak.lock();
+            if (ws != nullptr) {
+                ws->SendText(Json::Object({
+                    {"type", "Notice"},
+                    {"message", StringExtensions::sprintf(
+                        "You said this: %s",
+                        message.ToEncoding().c_str()
+                    )},
+                }).ToEncoding());
+            }
         }
 
         void OnOpened() {
+            std::lock_guard< decltype(mutex) > lock(mutex);
             diagnosticsSender.SendDiagnosticInformationString(
                 2,
                 "Opened"
+            );
+            std::weak_ptr< Client > selfWeak(shared_from_this());
+            const auto configuration = store->GetData("Configuration");
+            authenticationTimeout = scheduler->Schedule(
+                [
+                    selfWeak
+                ]{
+                    const auto self = selfWeak.lock();
+                    if (self == nullptr) {
+                        return;
+                    }
+                    self->OnAuthenticationTimeout();
+                },
+                scheduler->GetClock()->GetCurrentTime() + (double)configuration["WebSocketAuthenticationTimeout"]
             );
         }
 
@@ -67,6 +139,7 @@ namespace {
             unsigned int code,
             const std::string& reason
         ) {
+            std::lock_guard< decltype(mutex) > lock(mutex);
             diagnosticsSender.SendDiagnosticInformationFormatted(
                 2,
                 "Closed (code %u, reason: \"%s\")",
@@ -75,16 +148,14 @@ namespace {
             );
         }
 
-        bool OnText(
-            const std::shared_ptr< WebSockets::WebSocket >& ws,
-            const std::string& data,
-            const std::shared_ptr< Store >& store
-        ) {
+        void OnText(const std::string& data) {
+            std::unique_lock< decltype(mutex) > lock(mutex);
             diagnosticsSender.SendDiagnosticInformationFormatted(
                 0,
                 "Received: \"%s\"",
                 data.c_str()
             );
+            const auto ws = wsWeak.lock();
             const auto message = Json::Value::FromEncoding(data);
             if (
                 (message.GetType() != Json::Value::Type::Object)
@@ -95,11 +166,18 @@ namespace {
                     "Malformed message received: \"%s\"",
                     data.c_str()
                 );
-                ws->SendText(Json::Object({
-                    {"type", "Error"},
-                    {"message", "malformed message received"}
-                }).ToEncoding());
-                return false;
+                if (ws != nullptr) {
+                    ws->SendText(Json::Object({
+                        {"type", "Error"},
+                        {"message", "malformed message received"}
+                    }).ToEncoding());
+                }
+                auto closeDelegateCopy = closeDelegate;
+                lock.unlock();
+                if (closeDelegateCopy) {
+                    closeDelegateCopy(1005, "");
+                }
+                return;
             }
             const auto messageType = (std::string)message["type"];
             static const std::unordered_map< std::string, MessageHandler > messageHandlers{
@@ -107,20 +185,21 @@ namespace {
             };
             const auto messageHandler = messageHandlers.find(messageType);
             if (messageHandler == messageHandlers.end()) {
-                ws->SendText(Json::Object({
-                    {"type", "Error"},
-                    {
-                        "message",
-                        StringExtensions::sprintf(
-                            "Unknown message type received: %s",
-                            messageType.c_str()
-                        )
-                    },
-                }).ToEncoding());
+                if (ws != nullptr) {
+                    ws->SendText(Json::Object({
+                        {"type", "Error"},
+                        {
+                            "message",
+                            StringExtensions::sprintf(
+                                "Unknown message type received: %s",
+                                messageType.c_str()
+                            )
+                        },
+                    }).ToEncoding());
+                }
             } else {
-                (this->*messageHandler->second)(ws, message, store);
+                (this->*messageHandler->second)(message, lock);
             }
-            return true;
         }
 
     };
@@ -137,15 +216,15 @@ struct ApiWs::Impl
 
     std::unordered_map<
         std::shared_ptr< WebSockets::WebSocket >,
-        std::unique_ptr< Client >
+        std::shared_ptr< Client >
     > clients;
     SystemAbstractions::DiagnosticsSender diagnosticsSender;
     size_t generation = 0;
     std::shared_ptr< Http::Server > httpServer;
     bool mobilized = false;
-    std::mutex mutex;
+    std::recursive_mutex mutex;
     Http::IServer::UnregistrationDelegate resourceUnregistrationDelegate;
-    std::unique_ptr< Timekeeping::Scheduler > scheduler;
+    std::shared_ptr< Timekeeping::Scheduler > scheduler;
     std::shared_ptr< Store > store;
 
     // Constructor
@@ -162,7 +241,16 @@ struct ApiWs::Impl
         unsigned int code = 1005,
         const std::string& reason = ""
     ) {
+        const auto clientsEntry = clients.find(ws);
+        if (
+            (clientsEntry == clients.end())
+            || (clientsEntry->second == nullptr)
+        ) {
+            return;
+        }
         ws->Close(code, reason);
+        clientsEntry->second->OnClosed(code, reason);
+        clientsEntry->second = nullptr;
         const auto thisGeneration = generation;
         const auto configuration = store->GetData("Configuration");
         const auto webSocketCloseLinger = (double)configuration["WebSocketCloseLinger"];
@@ -217,15 +305,35 @@ struct ApiWs::Impl
         (void)ws->SubscribeToDiagnostics(diagnosticsSender.Chain());
         response.statusCode = 0;
         if (ws->OpenAsServer(connection, request, response, trailer)) {
-            std::unique_ptr< Client > client(new Client(connection->GetPeerId()));
+            auto& client = clients[ws];
+            std::weak_ptr< Impl > implWeak(shared_from_this());
+            std::weak_ptr< WebSockets::WebSocket > wsWeak(ws);
+            client = std::make_shared< Client >(
+                connection->GetPeerId(),
+                wsWeak,
+                store,
+                scheduler,
+                [implWeak, wsWeak](
+                    unsigned int code,
+                    const std::string& reason
+                ){
+                    const auto impl = implWeak.lock();
+                    if (impl == nullptr) {
+                        return;
+                    }
+                    const auto ws = wsWeak.lock();
+                    if (ws == nullptr) {
+                        return;
+                    }
+                    std::lock_guard< decltype(impl->mutex) > lock(impl->mutex);
+                    impl->CloseWebSocket(ws, code, reason);
+                }
+            );
             (void)client->diagnosticsSender.SubscribeToDiagnostics(
                 diagnosticsSender.Chain(),
                 configuration["DiagnosticReportingThresholds"]["WebSocket"]
             );
             client->OnOpened();
-            clients[ws] = std::move(client);
-            std::weak_ptr< Impl > implWeak(shared_from_this());
-            std::weak_ptr< WebSockets::WebSocket > wsWeak(ws);
             WebSockets::WebSocket::Delegates delegates;
             const auto thisGeneration = generation;
             delegates.close = [
@@ -292,11 +400,6 @@ struct ApiWs::Impl
         unsigned int code,
         const std::string& reason
     ) {
-        const auto clientsEntry = clients.find(ws);
-        if (clientsEntry == clients.end()) {
-            return;
-        }
-        clientsEntry->second->OnClosed(code, reason);
         CloseWebSocket(ws);
     }
 
@@ -308,9 +411,7 @@ struct ApiWs::Impl
         if (clientsEntry == clients.end()) {
             return;
         }
-        if (!clientsEntry->second->OnText(ws, data, store)) {
-            CloseWebSocket(ws);
-        }
+        clientsEntry->second->OnText(data);
     }
 
 };
@@ -331,6 +432,9 @@ void ApiWs::Demobilize() {
     std::lock_guard< decltype(impl_->mutex) > lock(impl_->mutex);
     if (!impl_->mobilized) {
         return;
+    }
+    for (auto& client: impl_->clients) {
+        impl_->CloseWebSocket(client.first);
     }
     impl_->clients.clear();
     impl_->resourceUnregistrationDelegate();
@@ -359,7 +463,7 @@ void ApiWs::Mobilize(
     }
     impl_->store = store;
     impl_->httpServer = httpServer;
-    impl_->scheduler.reset(new Timekeeping::Scheduler());
+    impl_->scheduler = std::make_shared< Timekeeping::Scheduler >();
     impl_->scheduler->SetClock(clock);
     std::weak_ptr< Impl > implWeak(impl_);
     impl_->resourceUnregistrationDelegate = impl_->httpServer->RegisterResource(
