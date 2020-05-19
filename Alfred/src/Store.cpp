@@ -11,6 +11,7 @@
 #include <mutex>
 #include <Timekeeping/Scheduler.hpp>
 #include <StringExtensions/StringExtensions.hpp>
+#include <SystemAbstractions/DiagnosticsSender.hpp>
 
 namespace {
 

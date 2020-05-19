@@ -117,21 +117,19 @@ namespace ApiHttp {
                 ){
                     Http::Response response;
                     const auto store = storeWeak.lock();
-                    Json::EncodingOptions encodingOptions;
                     if (store == nullptr) {
                         response.statusCode = 503;
                         response.reasonPhrase = "Service Unavailable";
-                        encodingOptions.pretty = true;
                         response.body = Json::Object({
-                            {"error", "The service is shutting down.  Please try again later!"},
-                        }).ToEncoding(encodingOptions);
+                            {"message", "The service is shutting down.  Please try again later!"},
+                        }).ToEncoding();
                     } else if (methods.find(request.method) == methods.end()) {
                         response.statusCode = 405;
                         response.reasonPhrase = "Method Not Allowed";
                     } else {
                         response.statusCode = 200;
                         response.reasonPhrase = "OK";
-                        response.body = handler(store, request, response).ToEncoding(encodingOptions);
+                        response.body = handler(store, request, response).ToEncoding();
                     }
                     if (response.body.empty()) {
                         response.headers.SetHeader("Content-Length", "0");
