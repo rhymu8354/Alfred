@@ -26,6 +26,7 @@
 #include <SystemAbstractions/DiagnosticsSender.hpp>
 #include <SystemAbstractions/DiagnosticsStreamReporter.hpp>
 #include <SystemAbstractions/File.hpp>
+#include <SystemAbstractions/NetworkConnection.hpp>
 #include <time.h>
 #include <TlsDecorator/TlsDecorator.hpp>
 
@@ -229,8 +230,6 @@ struct Service::Impl
      */
     const std::shared_ptr< TimeKeeper > timeKeeper = std::make_shared< TimeKeeper >();
 
-    std::vector< std::function< void() > > unsubscribeFromDiagnostics;
-
     // Constructor
 
     Impl()
@@ -244,18 +243,51 @@ struct Service::Impl
      * This function configures and starts the web client.
      */
     bool ConfigureAndStartHttpClient(const Json::Value& configuration) {
-        unsubscribeFromDiagnostics.push_back(
-            httpClient->SubscribeToDiagnostics(
-                diagnosticsSender.Chain(),
-                diagnosticReportingThresholds["HttpClient"]
-            )
+        (void)httpClient->SubscribeToDiagnostics(
+            diagnosticsSender.Chain(),
+            diagnosticReportingThresholds["HttpClient"]
         );
         auto clientTransport = std::make_shared< HttpNetworkTransport::HttpClientNetworkTransport >();
-        unsubscribeFromDiagnostics.push_back(
-            clientTransport->SubscribeToDiagnostics(
-                diagnosticsSender.Chain(),
-                diagnosticReportingThresholds["HttpClientNetworkTransport"]
-            )
+        (void)clientTransport->SubscribeToDiagnostics(
+            diagnosticsSender.Chain(),
+            diagnosticReportingThresholds["HttpClientNetworkTransport"]
+        );
+        std::string caCerts;
+        auto cacertsPath = (std::string)configuration["CaCertificates"];
+        if (!SystemAbstractions::File::IsAbsolutePath(cacertsPath)) {
+            cacertsPath = SystemAbstractions::File::GetExeParentDirectory() + "/" + cacertsPath;
+        }
+        if (!LoadFile(cacertsPath, "CA certificates", diagnosticsSender, caCerts)) {
+            return false;
+        }
+        clientTransport->SetConnectionFactory(
+            [
+                caCerts,
+                this
+            ](
+                const std::string& scheme,
+                const std::string& serverName
+            ) -> std::shared_ptr< SystemAbstractions::INetworkConnection > {
+                const auto connection = std::make_shared< SystemAbstractions::NetworkConnection >();
+                (void)connection->SubscribeToDiagnostics(
+                    diagnosticsSender.Chain(),
+                    diagnosticReportingThresholds["NetworkConnection"]
+                );
+                if (
+                    (scheme == "https")
+                    || (scheme == "wss")
+                ) {
+                    const auto tlsDecorator = std::make_shared< TlsDecorator::TlsDecorator >();
+                    (void)tlsDecorator->SubscribeToDiagnostics(
+                        diagnosticsSender.Chain(),
+                        diagnosticReportingThresholds["TlsDecorator"]
+                    );
+                    tlsDecorator->ConfigureAsClient(connection, caCerts, serverName);
+                    return tlsDecorator;
+                } else {
+                    return connection;
+                }
+            }
         );
         Http::Client::MobilizationDependencies httpClientDeps;
         httpClientDeps.timeKeeper = timeKeeper;
@@ -290,18 +322,14 @@ struct Service::Impl
     bool ConfigureAndStartHttpServer(const Json::Value& configuration) {
         Http::Server::MobilizationDependencies httpDeps;
         httpDeps.timeKeeper = std::make_shared< TimeKeeper >();
-        unsubscribeFromDiagnostics.push_back(
-            httpServer->SubscribeToDiagnostics(
-                diagnosticsSender.Chain(),
-                diagnosticReportingThresholds["HttpServer"]
-            )
+        (void)httpServer->SubscribeToDiagnostics(
+            diagnosticsSender.Chain(),
+            diagnosticReportingThresholds["HttpServer"]
         );
         auto transport = std::make_shared< HttpNetworkTransport::HttpServerNetworkTransport >();
-        unsubscribeFromDiagnostics.push_back(
-            transport->SubscribeToDiagnostics(
-                diagnosticsSender.Chain(),
-                diagnosticReportingThresholds["HttpServerNetworkTransport"]
-            )
+        (void)transport->SubscribeToDiagnostics(
+            diagnosticsSender.Chain(),
+            diagnosticReportingThresholds["HttpServerNetworkTransport"]
         );
         std::string cert, key;
         auto certPath = (std::string)configuration["SslCertificate"];
@@ -328,11 +356,9 @@ struct Service::Impl
             std::shared_ptr< SystemAbstractions::INetworkConnection > connection
         ){
             const auto tlsDecorator = std::make_shared< TlsDecorator::TlsDecorator >();
-            unsubscribeFromDiagnostics.push_back(
-                tlsDecorator->SubscribeToDiagnostics(
-                    diagnosticsSender.Chain(),
-                    diagnosticReportingThresholds["TlsDecorator"]
-                )
+            (void)tlsDecorator->SubscribeToDiagnostics(
+                diagnosticsSender.Chain(),
+                diagnosticReportingThresholds["TlsDecorator"]
             );
             tlsDecorator->ConfigureAsServer(
                 connection,
@@ -564,23 +590,19 @@ struct Service::Impl
         httpServer = std::make_shared< Http::Server >();
         if (!ConfigureAndStartHttpServer(configuration)) {
             httpServer = nullptr;
-            UnsubscribeFromDiagnostics();
             return false;
         }
         httpClient = std::make_shared< Http::Client >();
         if (!ConfigureAndStartHttpClient(configuration)) {
             httpClient = nullptr;
             httpServer = nullptr;
-            UnsubscribeFromDiagnostics();
             return false;
         }
         ApiHttp::RegisterResources(store, *httpServer);
         apiWs = std::make_shared< ApiWs >();
-        unsubscribeFromDiagnostics.push_back(
-            apiWs->SubscribeToDiagnostics(
-                diagnosticsSender.Chain(),
-                diagnosticReportingThresholds["ApiWs"]
-            )
+        (void)apiWs->SubscribeToDiagnostics(
+            diagnosticsSender.Chain(),
+            diagnosticReportingThresholds["ApiWs"]
         );
         apiWs->Mobilize(store, httpClient, httpServer, timeKeeper, configuration);
         diagnosticsSender.SendDiagnosticInformationString(
@@ -604,7 +626,6 @@ struct Service::Impl
         httpClient = nullptr;
         httpServer->Demobilize();
         httpServer = nullptr;
-        UnsubscribeFromDiagnostics();
     }
 
     /**
@@ -615,13 +636,6 @@ struct Service::Impl
             stopService.set_value();
             stopServiceSet = true;
         }
-    }
-
-    void UnsubscribeFromDiagnostics() {
-        for (const auto& fn: unsubscribeFromDiagnostics) {
-            fn();
-        }
-        unsubscribeFromDiagnostics.clear();
     }
 
 };
