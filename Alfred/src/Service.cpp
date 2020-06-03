@@ -292,7 +292,6 @@ struct Service::Impl
         Http::Client::MobilizationDependencies httpClientDeps;
         httpClientDeps.timeKeeper = timeKeeper;
         httpClientDeps.transport = clientTransport;
-        httpClientDeps.requestTimeoutSeconds = configuration["RequestTimeoutSeconds"];
         httpClient->Mobilize(httpClientDeps);
         return true;
     }
