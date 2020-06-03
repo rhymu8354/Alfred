@@ -1,0 +1,14 @@
+[Unit]
+Description=Alfred
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/ec2-user/Alfred/Alfred --daemon
+KillMode=process
+Restart=on-failure
+RestartPreventExitStatus=1
+
+[Install]
+WantedBy=multi-user.target
