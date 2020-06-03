@@ -63,8 +63,7 @@ namespace {
         int authenticationTimeout = 0;
         CloseDelegate closeDelegate;
         SystemAbstractions::DiagnosticsSender diagnosticsSender;
-        std::shared_ptr< Http::Client > httpClient;
-        std::unordered_map< int, std::shared_ptr< Http::IClient::Transaction > > httpClientTransactions;
+        std::shared_ptr< HttpClientTransactions > httpClientTransactions;
         std::unordered_set< std::string > identifiers;
         static const std::unordered_map< std::string, MessageHandler > messageHandlers;
         std::mutex mutex;
@@ -79,7 +78,7 @@ namespace {
         Client(
             const std::string& peerId,
             const std::weak_ptr< WebSockets::WebSocket >& wsWeak,
-            const std::shared_ptr< Http::Client >& httpClient,
+            const std::shared_ptr< HttpClientTransactions >& httpClientTransactions,
             const std::shared_ptr< Store >& store,
             const std::shared_ptr< Timekeeping::Scheduler >& scheduler,
             CloseDelegate closeDelegate
@@ -87,7 +86,7 @@ namespace {
             : closeDelegate(closeDelegate)
             , diagnosticsSender(peerId)
             , scheduler(scheduler)
-            , httpClient(httpClient)
+            , httpClientTransactions(httpClientTransactions)
             , store(store)
             , wsWeak(wsWeak)
         {
@@ -263,59 +262,6 @@ namespace {
             }
         }
 
-        void PostHttpClientTransaction(
-            Http::Request& request,
-            std::function< void(Client& self, std::unique_lock< std::mutex >& lock, Http::Response& response) > onCompletion
-        ) {
-            if (!request.target.HasPort()) {
-                const auto scheme = request.target.GetScheme();
-                if (
-                    (scheme == "https")
-                    || (scheme == "wss")
-                ) {
-                    request.target.SetPort(443);
-                }
-            }
-            const auto id = nextHttpClientTransactionId++;
-            diagnosticsSender.SendDiagnosticInformationFormatted(
-                0,
-                "HTTP Request %d: %s",
-                id,
-                request.target.GenerateString().c_str()
-            );
-            auto& httpClientTransaction = httpClientTransactions[id];
-            httpClientTransaction = httpClient->Request(request);
-            std::weak_ptr< Client > selfWeak(shared_from_this());
-            httpClientTransaction->SetCompletionDelegate(
-                [
-                    id,
-                    onCompletion,
-                    selfWeak
-                ]{
-                    auto self = selfWeak.lock();
-                    if (self == nullptr) {
-                        return;
-                    }
-                    std::unique_lock< decltype(self->mutex) > lock(self->mutex);
-                    auto httpClientTransactionsEntry = self->httpClientTransactions.find(id);
-                    if (httpClientTransactionsEntry == self->httpClientTransactions.end()) {
-                        return;
-                    }
-                    const auto& httpClientTransaction = httpClientTransactionsEntry->second;
-                    self->diagnosticsSender.SendDiagnosticInformationFormatted(
-                        0,
-                        "HTTP Reply %d: %u (%s)",
-                        id,
-                        httpClientTransaction->response.statusCode,
-                        httpClientTransaction->response.reasonPhrase.c_str()
-                    );
-                    auto response = std::move(httpClientTransaction->response);
-                    (void)self->httpClientTransactions.erase(httpClientTransactionsEntry);
-                    onCompletion(*self, lock, response);
-                }
-            );
-        }
-
         void ReportError(
             const std::string& message,
             std::unique_lock< std::mutex >& lock,
@@ -350,13 +296,18 @@ namespace {
                 std::string("OAuth ") + token
             );
             std::weak_ptr< Client > selfWeak(shared_from_this());
-            PostHttpClientTransaction(
+            httpClientTransactions->Post(
                 request,
                 [
                     onFailure,
                     onSuccess,
                     selfWeak
-                ](Client& self, std::unique_lock< std::mutex >& lock, const Http::Response& response){
+                ](Http::Response& response){
+                    auto self = selfWeak.lock();
+                    if (self == nullptr) {
+                        return;
+                    }
+                    std::unique_lock< decltype(self->mutex) > lock(self->mutex);
                     if (response.statusCode == 200) {
                         const auto data = Json::Value::FromEncoding(response.body);
                         intmax_t twitchId;
@@ -367,11 +318,11 @@ namespace {
                                 &twitchId
                             ) == 1
                         ) {
-                            onSuccess(self, lock, twitchId);
+                            onSuccess(*self, lock, twitchId);
                             return;
                         }
                     }
-                    onFailure(self, lock);
+                    onFailure(*self, lock);
                 }
             );
         }
@@ -398,7 +349,7 @@ struct ApiWs::Impl
     > clients;
     SystemAbstractions::DiagnosticsSender diagnosticsSender;
     size_t generation = 0;
-    std::shared_ptr< Http::Client > httpClient;
+    std::shared_ptr< HttpClientTransactions > httpClientTransactions;
     std::shared_ptr< Http::Server > httpServer;
     bool mobilized = false;
     std::recursive_mutex mutex;
@@ -490,7 +441,7 @@ struct ApiWs::Impl
             client = std::make_shared< Client >(
                 connection->GetPeerId(),
                 wsWeak,
-                httpClient,
+                httpClientTransactions,
                 store,
                 scheduler,
                 [implWeak, wsWeak](
@@ -633,7 +584,7 @@ SystemAbstractions::DiagnosticsSender::UnsubscribeDelegate ApiWs::SubscribeToDia
 
 void ApiWs::Mobilize(
     const std::shared_ptr< Store >& store,
-    const std::shared_ptr< Http::Client >& httpClient,
+    const std::shared_ptr< HttpClientTransactions >& httpClientTransactions,
     const std::shared_ptr< Http::Server >& httpServer,
     const std::shared_ptr< Timekeeping::Clock >& clock,
     const Json::Value& configuration
@@ -643,7 +594,7 @@ void ApiWs::Mobilize(
         return;
     }
     impl_->store = store;
-    impl_->httpClient = httpClient;
+    impl_->httpClientTransactions = httpClientTransactions;
     impl_->httpServer = httpServer;
     impl_->scheduler = std::make_shared< Timekeeping::Scheduler >();
     impl_->scheduler->SetClock(clock);

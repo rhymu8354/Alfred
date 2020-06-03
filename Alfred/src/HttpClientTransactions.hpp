@@ -1,33 +1,32 @@
 #pragma once
 
 /**
- * @file ApiWs.hpp
+ * @file HttpClientTransactions.hpp
  *
- * This module declares the ApiWs class which manages an Application
- * Programming Interface (API) to the service via WebSockets (WS).
+ * This module declares the HttpClientTransactions class which uses an
+ * Http::Client object to create and complete request-response transactions.
  */
 
-#include "HttpClientTransactions.hpp"
-#include "Store.hpp"
-
-#include <Http/Server.hpp>
-#include <Json/Value.hpp>
+#include <Http/Client.hpp>
 #include <memory>
 #include <SystemAbstractions/DiagnosticsSender.hpp>
-#include <Timekeeping/Clock.hpp>
 
-class ApiWs {
+class HttpClientTransactions {
+    // Types
+public:
+    using CompletionDelegate = std::function< void(Http::Response& response) >;
+
     // Lifecycle
 public:
-    ~ApiWs() noexcept;
-    ApiWs(const ApiWs&) = delete;
-    ApiWs(ApiWs&&) noexcept;
-    ApiWs& operator=(const ApiWs&) = delete;
-    ApiWs& operator=(ApiWs&&) noexcept;
+    ~HttpClientTransactions() noexcept;
+    HttpClientTransactions(const HttpClientTransactions&) = delete;
+    HttpClientTransactions(HttpClientTransactions&&) noexcept;
+    HttpClientTransactions& operator=(const HttpClientTransactions&) = delete;
+    HttpClientTransactions& operator=(HttpClientTransactions&&) noexcept;
 
     // Constructor
 public:
-    ApiWs();
+    HttpClientTransactions();
 
     // Methods
 public:
@@ -55,11 +54,12 @@ public:
     );
 
     void Mobilize(
-        const std::shared_ptr< Store >& store,
-        const std::shared_ptr< HttpClientTransactions >& httpClientTransactions,
-        const std::shared_ptr< Http::Server >& httpServer,
-        const std::shared_ptr< Timekeeping::Clock >& clock,
-        const Json::Value& configuration
+        const std::shared_ptr< Http::Client >& httpClient
+    );
+
+    void Post(
+        Http::Request& request,
+        CompletionDelegate completionDelegate
     );
 
     // Private properties

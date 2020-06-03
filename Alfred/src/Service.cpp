@@ -6,6 +6,7 @@
 
 #include "ApiHttp.hpp"
 #include "ApiWs.hpp"
+#include "HttpClientTransactions.hpp"
 #include "LoadFile.hpp"
 #include "Service.hpp"
 #include "Store.hpp"
@@ -197,6 +198,8 @@ struct Service::Impl
      * This is used to make requests for resources from servers via HTTP.
      */
     std::shared_ptr< Http::Client > httpClient;
+
+    std::shared_ptr< HttpClientTransactions > httpClientTransactions;
 
     /**
      * This is used to receive requests for resources from clients via HTTP.
@@ -597,13 +600,19 @@ struct Service::Impl
             httpServer = nullptr;
             return false;
         }
+        httpClientTransactions = std::make_shared< HttpClientTransactions >();
+        (void)httpClientTransactions->SubscribeToDiagnostics(
+            diagnosticsSender.Chain(),
+            diagnosticReportingThresholds["HttpClientTransactions"]
+        );
+        httpClientTransactions->Mobilize(httpClient);
         ApiHttp::RegisterResources(store, *httpServer);
         apiWs = std::make_shared< ApiWs >();
         (void)apiWs->SubscribeToDiagnostics(
             diagnosticsSender.Chain(),
             diagnosticReportingThresholds["ApiWs"]
         );
-        apiWs->Mobilize(store, httpClient, httpServer, timeKeeper, configuration);
+        apiWs->Mobilize(store, httpClientTransactions, httpServer, timeKeeper, configuration);
         diagnosticsSender.SendDiagnosticInformationString(
             3,
             "Alfred up and running."
@@ -621,6 +630,8 @@ struct Service::Impl
         );
         apiWs->Demobilize();
         apiWs = nullptr;
+        httpClientTransactions->Demobilize();
+        httpClientTransactions = nullptr;
         httpClient->Demobilize();
         httpClient = nullptr;
         httpServer->Demobilize();

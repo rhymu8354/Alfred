@@ -8,6 +8,8 @@ set(Sources
     src/ApiHttp.hpp
     src/ApiWs.cpp
     src/ApiWs.hpp
+    src/HttpClientTransactions.cpp
+    src/HttpClientTransactions.hpp
     src/LoadFile.cpp
     src/LoadFile.hpp
     src/main.cpp
