@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <functional>
 #include <Http/Server.hpp>
+#include <inttypes.h>
 #include <Json/Value.hpp>
 #include <memory>
 #include <mutex>
@@ -63,9 +64,11 @@ namespace {
         CloseDelegate closeDelegate;
         SystemAbstractions::DiagnosticsSender diagnosticsSender;
         std::shared_ptr< Http::Client > httpClient;
+        std::unordered_map< int, std::shared_ptr< Http::IClient::Transaction > > httpClientTransactions;
         std::unordered_set< std::string > identifiers;
         static const std::unordered_map< std::string, MessageHandler > messageHandlers;
         std::mutex mutex;
+        int nextHttpClientTransactionId = 1;
         std::unordered_set< std::string > roles;
         std::shared_ptr< Timekeeping::Scheduler > scheduler;
         std::shared_ptr< Store > store;
@@ -131,6 +134,22 @@ namespace {
                     ReportError("Invalid access key", lock, true);
                     return;
                 }
+            } else if (message.Has("twitch")) {
+                ValidateOAuthToken(
+                    message["twitch"],
+                    [](Client& self, std::unique_lock< std::mutex >& lock, intmax_t twitchId){
+                        const auto identifier = StringExtensions::sprintf(
+                            "twitch:%" PRIdMAX,
+                            twitchId
+                        );
+                        const auto roles = self.store->GetData("Roles");
+                        self.AddIdentifier(identifier);
+                        self.OnAuthenticated();
+                    },
+                    [](Client& self, std::unique_lock< std::mutex >& lock){
+                        self.ReportError("Invalid OAuth token", lock, true);
+                    }
+                );
             } else {
                 ReportError("Unrecognized authentication method", lock, true);
                 return;
@@ -244,6 +263,59 @@ namespace {
             }
         }
 
+        void PostHttpClientTransaction(
+            Http::Request& request,
+            std::function< void(Client& self, std::unique_lock< std::mutex >& lock, Http::Response& response) > onCompletion
+        ) {
+            if (!request.target.HasPort()) {
+                const auto scheme = request.target.GetScheme();
+                if (
+                    (scheme == "https")
+                    || (scheme == "wss")
+                ) {
+                    request.target.SetPort(443);
+                }
+            }
+            const auto id = nextHttpClientTransactionId++;
+            diagnosticsSender.SendDiagnosticInformationFormatted(
+                0,
+                "HTTP Request %d: %s",
+                id,
+                request.target.GenerateString().c_str()
+            );
+            auto& httpClientTransaction = httpClientTransactions[id];
+            httpClientTransaction = httpClient->Request(request);
+            std::weak_ptr< Client > selfWeak(shared_from_this());
+            httpClientTransaction->SetCompletionDelegate(
+                [
+                    id,
+                    onCompletion,
+                    selfWeak
+                ]{
+                    auto self = selfWeak.lock();
+                    if (self == nullptr) {
+                        return;
+                    }
+                    std::unique_lock< decltype(self->mutex) > lock(self->mutex);
+                    auto httpClientTransactionsEntry = self->httpClientTransactions.find(id);
+                    if (httpClientTransactionsEntry == self->httpClientTransactions.end()) {
+                        return;
+                    }
+                    const auto& httpClientTransaction = httpClientTransactionsEntry->second;
+                    self->diagnosticsSender.SendDiagnosticInformationFormatted(
+                        0,
+                        "HTTP Reply %d: %u (%s)",
+                        id,
+                        httpClientTransaction->response.statusCode,
+                        httpClientTransaction->response.reasonPhrase.c_str()
+                    );
+                    auto response = std::move(httpClientTransaction->response);
+                    (void)self->httpClientTransactions.erase(httpClientTransactionsEntry);
+                    onCompletion(*self, lock, response);
+                }
+            );
+        }
+
         void ReportError(
             const std::string& message,
             std::unique_lock< std::mutex >& lock,
@@ -264,6 +336,46 @@ namespace {
                 }
             }
         }
+
+        void ValidateOAuthToken(
+            const std::string& token,
+            std::function< void(Client& self, std::unique_lock< std::mutex >& lock, intmax_t twitchId) > onSuccess,
+            std::function< void(Client& self, std::unique_lock< std::mutex >& lock) > onFailure
+        ) {
+            Http::Request request;
+            request.method = "GET";
+            request.target.ParseFromString("https://id.twitch.tv/oauth2/validate");
+            request.headers.SetHeader(
+                "Authorization",
+                std::string("OAuth ") + token
+            );
+            std::weak_ptr< Client > selfWeak(shared_from_this());
+            PostHttpClientTransaction(
+                request,
+                [
+                    onFailure,
+                    onSuccess,
+                    selfWeak
+                ](Client& self, std::unique_lock< std::mutex >& lock, const Http::Response& response){
+                    if (response.statusCode == 200) {
+                        const auto data = Json::Value::FromEncoding(response.body);
+                        intmax_t twitchId;
+                        if (
+                            sscanf(
+                                ((std::string)data["user_id"]).c_str(),
+                                "%" SCNdMAX,
+                                &twitchId
+                            ) == 1
+                        ) {
+                            onSuccess(self, lock, twitchId);
+                            return;
+                        }
+                    }
+                    onFailure(self, lock);
+                }
+            );
+        }
+
     };
 
     const std::unordered_map< std::string, Client::MessageHandler > Client::messageHandlers{
