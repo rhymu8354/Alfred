@@ -9,6 +9,7 @@
 
 #include "Store.hpp"
 
+#include <Http/Client.hpp>
 #include <Http/Server.hpp>
 #include <Json/Value.hpp>
 #include <memory>
@@ -55,6 +56,7 @@ public:
 
     void Mobilize(
         const std::shared_ptr< Store >& store,
+        const std::shared_ptr< Http::Client >& httpClient,
         const std::shared_ptr< Http::Server >& httpServer,
         const std::shared_ptr< Timekeeping::Clock >& clock,
         const Json::Value& configuration

@@ -195,7 +195,7 @@ struct Service::Impl
     /**
      * This is used to make requests for resources from servers via HTTP.
      */
-    Http::Client httpClient;
+    std::shared_ptr< Http::Client > httpClient;
 
     /**
      * This is used to receive requests for resources from clients via HTTP.
@@ -245,7 +245,7 @@ struct Service::Impl
      */
     bool ConfigureAndStartHttpClient(const Json::Value& configuration) {
         unsubscribeFromDiagnostics.push_back(
-            httpClient.SubscribeToDiagnostics(
+            httpClient->SubscribeToDiagnostics(
                 diagnosticsSender.Chain(),
                 diagnosticReportingThresholds["HttpClient"]
             )
@@ -261,7 +261,7 @@ struct Service::Impl
         httpClientDeps.timeKeeper = timeKeeper;
         httpClientDeps.transport = clientTransport;
         httpClientDeps.requestTimeoutSeconds = configuration["RequestTimeoutSeconds"];
-        httpClient.Mobilize(httpClientDeps);
+        httpClient->Mobilize(httpClientDeps);
         return true;
     }
 
@@ -567,7 +567,9 @@ struct Service::Impl
             UnsubscribeFromDiagnostics();
             return false;
         }
+        httpClient = std::make_shared< Http::Client >();
         if (!ConfigureAndStartHttpClient(configuration)) {
+            httpClient = nullptr;
             httpServer = nullptr;
             UnsubscribeFromDiagnostics();
             return false;
@@ -580,7 +582,7 @@ struct Service::Impl
                 diagnosticReportingThresholds["ApiWs"]
             )
         );
-        apiWs->Mobilize(store, httpServer, timeKeeper, configuration);
+        apiWs->Mobilize(store, httpClient, httpServer, timeKeeper, configuration);
         diagnosticsSender.SendDiagnosticInformationString(
             3,
             "Alfred up and running."
@@ -598,7 +600,8 @@ struct Service::Impl
         );
         apiWs->Demobilize();
         apiWs = nullptr;
-        httpClient.Demobilize();
+        httpClient->Demobilize();
+        httpClient = nullptr;
         httpServer->Demobilize();
         httpServer = nullptr;
         UnsubscribeFromDiagnostics();

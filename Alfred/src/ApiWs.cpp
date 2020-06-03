@@ -7,19 +7,32 @@
 
 #include "ApiWs.hpp"
 
+#include <algorithm>
 #include <functional>
 #include <Http/Server.hpp>
 #include <Json/Value.hpp>
 #include <memory>
 #include <mutex>
 #include <stddef.h>
+#include <string>
 #include <StringExtensions/StringExtensions.hpp>
 #include <SystemAbstractions/DiagnosticsSender.hpp>
 #include <Timekeeping/Scheduler.hpp>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 #include <WebSockets/WebSocket.hpp>
 
 namespace {
+
+    std::vector< std::string > Sorted(const std::unordered_set< std::string >& unsorted) {
+        std::vector< std::string > sorted(
+            unsorted.begin(),
+            unsorted.end()
+        );
+        std::sort(sorted.begin(), sorted.end());
+        return sorted;
+    }
 
     struct Client
         : public std::enable_shared_from_this< Client >
@@ -38,13 +51,22 @@ namespace {
             std::unique_lock< std::mutex >& lock
         );
 
+        #define DEFINE_MESSAGE_HANDLER(x) void x( \
+            const Json::Value& message, \
+            std::unique_lock< decltype(mutex) >& lock \
+        )
+
         // Properties
 
         bool authenticated = false;
         int authenticationTimeout = 0;
         CloseDelegate closeDelegate;
         SystemAbstractions::DiagnosticsSender diagnosticsSender;
+        std::shared_ptr< Http::Client > httpClient;
+        std::unordered_set< std::string > identifiers;
+        static const std::unordered_map< std::string, MessageHandler > messageHandlers;
         std::mutex mutex;
+        std::unordered_set< std::string > roles;
         std::shared_ptr< Timekeeping::Scheduler > scheduler;
         std::shared_ptr< Store > store;
         std::weak_ptr< WebSockets::WebSocket > wsWeak;
@@ -54,6 +76,7 @@ namespace {
         Client(
             const std::string& peerId,
             const std::weak_ptr< WebSockets::WebSocket >& wsWeak,
+            const std::shared_ptr< Http::Client >& httpClient,
             const std::shared_ptr< Store >& store,
             const std::shared_ptr< Timekeeping::Scheduler >& scheduler,
             CloseDelegate closeDelegate
@@ -61,12 +84,81 @@ namespace {
             : closeDelegate(closeDelegate)
             , diagnosticsSender(peerId)
             , scheduler(scheduler)
+            , httpClient(httpClient)
             , store(store)
             , wsWeak(wsWeak)
         {
         }
 
         // Methods
+
+        void AddRole(const std::string& role) {
+            if (roles.insert(role).second) {
+                diagnosticsSender.SendDiagnosticInformationString(
+                    2,
+                    std::string("Role added: ") + role
+                );
+            }
+        }
+
+        void AddIdentifier(const std::string& identifier) {
+            if (identifiers.insert(identifier).second) {
+                diagnosticsSender.SendDiagnosticInformationString(
+                    2,
+                    std::string("Identifier added: ") + identifier
+                );
+                const auto roles = store->GetData("Roles");
+                if (roles.Has(identifier)) {
+                    for (const auto rolesEntry: roles[identifier]) {
+                        const auto role = (std::string)rolesEntry.value();
+                        AddRole(role);
+                    }
+                }
+            }
+        }
+
+        DEFINE_MESSAGE_HANDLER(OnAuthenticate) {
+            if (authenticated) {
+                ReportError("Already authenticated; reconnect to reauthenticate", lock);
+                return;
+            }
+            if (message.Has("key")) {
+                const auto identifier = std::string("key:") + (std::string)message["key"];
+                const auto roles = store->GetData("Roles");
+                if (roles.Has(identifier)) {
+                    AddIdentifier(identifier);
+                } else {
+                    ReportError("Invalid access key", lock, true);
+                    return;
+                }
+            } else {
+                ReportError("Unrecognized authentication method", lock, true);
+                return;
+            }
+            if (!identifiers.empty()) {
+                OnAuthenticated();
+            }
+        }
+
+        void OnAuthenticated() {
+            diagnosticsSender.SendDiagnosticInformationFormatted(
+                3,
+                "Authenticated, identifiers: %s; roles: %s",
+                StringExtensions::Join(Sorted(identifiers), ", ").c_str(),
+                StringExtensions::Join(Sorted(roles), ", ").c_str()
+            );
+            authenticated = true;
+            if (authenticationTimeout) {
+                scheduler->Cancel(authenticationTimeout);
+                authenticationTimeout = 0;
+            }
+            const auto ws = wsWeak.lock();
+            if (ws != nullptr) {
+                ws->SendText(Json::Object({
+                    {"type", "Authenticated"},
+                }).ToEncoding());
+            }
+        }
 
         void OnAuthenticationTimeout() {
             std::unique_lock< decltype(mutex) > lock(mutex);
@@ -78,39 +170,7 @@ namespace {
                 SystemAbstractions::DiagnosticsSender::Levels::WARNING,
                 "Authentication timeout"
             );
-            const auto ws = wsWeak.lock();
-            if (ws != nullptr) {
-                ws->SendText(Json::Object({
-                    {"type", "Error"},
-                    {"message", "Authentication timeout"},
-                }).ToEncoding());
-            }
-            auto closeDelegateCopy = closeDelegate;
-            lock.unlock();
-            if (closeDelegateCopy) {
-                closeDelegateCopy(1005, "");
-            }
-        }
-
-        void OnGreeting(
-            const Json::Value& message,
-            std::unique_lock< decltype(mutex) >& lock
-        ) {
-            authenticated = true;
-            if (authenticationTimeout) {
-                scheduler->Cancel(authenticationTimeout);
-                authenticationTimeout = 0;
-            }
-            const auto ws = wsWeak.lock();
-            if (ws != nullptr) {
-                ws->SendText(Json::Object({
-                    {"type", "Notice"},
-                    {"message", StringExtensions::sprintf(
-                        "You said this: %s",
-                        message.ToEncoding().c_str()
-                    )},
-                }).ToEncoding());
-            }
+            ReportError("Authentication timeout", lock, true);
         }
 
         void OnOpened() {
@@ -166,42 +226,48 @@ namespace {
                     "Malformed message received: \"%s\"",
                     data.c_str()
                 );
-                if (ws != nullptr) {
-                    ws->SendText(Json::Object({
-                        {"type", "Error"},
-                        {"message", "malformed message received"}
-                    }).ToEncoding());
-                }
-                auto closeDelegateCopy = closeDelegate;
-                lock.unlock();
-                if (closeDelegateCopy) {
-                    closeDelegateCopy(1005, "");
-                }
+                ReportError("malformed message received", lock, true);
                 return;
             }
             const auto messageType = (std::string)message["type"];
-            static const std::unordered_map< std::string, MessageHandler > messageHandlers{
-                {"Greeting", &Client::OnGreeting},
-            };
             const auto messageHandler = messageHandlers.find(messageType);
             if (messageHandler == messageHandlers.end()) {
-                if (ws != nullptr) {
-                    ws->SendText(Json::Object({
-                        {"type", "Error"},
-                        {
-                            "message",
-                            StringExtensions::sprintf(
-                                "Unknown message type received: %s",
-                                messageType.c_str()
-                            )
-                        },
-                    }).ToEncoding());
-                }
+                ReportError(
+                    StringExtensions::sprintf(
+                        "Unknown message type received: %s",
+                        messageType.c_str()
+                    ),
+                    lock
+                );
             } else {
                 (this->*messageHandler->second)(message, lock);
             }
         }
 
+        void ReportError(
+            const std::string& message,
+            std::unique_lock< std::mutex >& lock,
+            bool disconnect = false
+        ) {
+            const auto ws = wsWeak.lock();
+            if (ws != nullptr) {
+                ws->SendText(Json::Object({
+                    {"type", "Error"},
+                    {"message", message},
+                }).ToEncoding());
+            }
+            if (disconnect) {
+                auto closeDelegateCopy = closeDelegate;
+                lock.unlock();
+                if (closeDelegateCopy) {
+                    closeDelegateCopy(1005, "");
+                }
+            }
+        }
+    };
+
+    const std::unordered_map< std::string, Client::MessageHandler > Client::messageHandlers{
+        {"Authenticate", &Client::OnAuthenticate},
     };
 
 }
@@ -220,6 +286,7 @@ struct ApiWs::Impl
     > clients;
     SystemAbstractions::DiagnosticsSender diagnosticsSender;
     size_t generation = 0;
+    std::shared_ptr< Http::Client > httpClient;
     std::shared_ptr< Http::Server > httpServer;
     bool mobilized = false;
     std::recursive_mutex mutex;
@@ -311,6 +378,7 @@ struct ApiWs::Impl
             client = std::make_shared< Client >(
                 connection->GetPeerId(),
                 wsWeak,
+                httpClient,
                 store,
                 scheduler,
                 [implWeak, wsWeak](
@@ -453,6 +521,7 @@ SystemAbstractions::DiagnosticsSender::UnsubscribeDelegate ApiWs::SubscribeToDia
 
 void ApiWs::Mobilize(
     const std::shared_ptr< Store >& store,
+    const std::shared_ptr< Http::Client >& httpClient,
     const std::shared_ptr< Http::Server >& httpServer,
     const std::shared_ptr< Timekeeping::Clock >& clock,
     const Json::Value& configuration
@@ -462,6 +531,7 @@ void ApiWs::Mobilize(
         return;
     }
     impl_->store = store;
+    impl_->httpClient = httpClient;
     impl_->httpServer = httpServer;
     impl_->scheduler = std::make_shared< Timekeeping::Scheduler >();
     impl_->scheduler->SetClock(clock);
