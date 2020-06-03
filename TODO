@@ -5,7 +5,8 @@
     * Write metadata
     * Create (includes pushing, unshifting)
     * Delete (includes shifting, popping)
-☐ Establish the service @created(2020-04-27 17:06)
+✔ Establish the service @created(2020-04-27 17:06) @done(2020-06-03 12:46)
+✔ Add Twitch OAuth token authentication mechanism @created(2020-06-03 14:32) @done(2020-06-03 16:49)
 ☐ Use OIDC Code flow to get (and refresh) OAuth token @created(2020-04-27 22:06)
 ☐ Interact with Twitch pub/sub to receive events @created(2020-04-27 22:03)
     ☐ Bits @created(2020-04-27 22:13)
