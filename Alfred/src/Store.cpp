@@ -57,13 +57,10 @@ namespace {
         }
     }
 
-    Json::Value ExtractData(const Json::Value& root) {
-        if (
-            (root.GetType() == Json::Value::Type::Object)
-            && (root.Has("data"))
-        ) {
-            return ExtractData(root["data"]);
-        }
+    // Forward declaraction
+    Json::Value ExtractData(const Json::Value& root);
+
+    Json::Value ExtractDataNoMeta(const Json::Value& root) {
         switch (root.GetType()) {
             case Json::Value::Type::Array: {
                 auto data = Json::Array({});
@@ -83,6 +80,16 @@ namespace {
 
             default: return root;
         }
+    }
+
+    Json::Value ExtractData(const Json::Value& root) {
+        if (
+            (root.GetType() == Json::Value::Type::Object)
+            && root.Has("data")
+        ) {
+            return ExtractDataNoMeta(root["data"]);
+        }
+        return ExtractDataNoMeta(root);
     }
 
 }
