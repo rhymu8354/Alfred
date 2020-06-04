@@ -97,7 +97,7 @@ namespace {
         void AddRole(const std::string& role) {
             if (roles.insert(role).second) {
                 diagnosticsSender.SendDiagnosticInformationString(
-                    2,
+                    1,
                     std::string("Role added: ") + role
                 );
             }
@@ -106,7 +106,7 @@ namespace {
         void AddIdentifier(const std::string& identifier) {
             if (identifiers.insert(identifier).second) {
                 diagnosticsSender.SendDiagnosticInformationString(
-                    2,
+                    1,
                     std::string("Identifier added: ") + identifier
                 );
                 const auto roles = store->GetData("Roles");
@@ -160,7 +160,7 @@ namespace {
 
         void OnAuthenticated() {
             diagnosticsSender.SendDiagnosticInformationFormatted(
-                3,
+                2,
                 "Authenticated, identifiers: %s; roles: %s",
                 StringExtensions::Join(Sorted(identifiers), ", ").c_str(),
                 StringExtensions::Join(Sorted(roles), ", ").c_str()
