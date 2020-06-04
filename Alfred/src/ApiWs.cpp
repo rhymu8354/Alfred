@@ -109,7 +109,7 @@ namespace {
                     1,
                     std::string("Identifier added: ") + identifier
                 );
-                const auto roles = store->GetData("Roles");
+                const auto roles = store->GetData({"Roles"}, {});
                 if (roles.Has(identifier)) {
                     for (const auto rolesEntry: roles[identifier]) {
                         const auto role = (std::string)rolesEntry.value();
@@ -126,7 +126,7 @@ namespace {
             }
             if (message.Has("key")) {
                 const auto identifier = std::string("key:") + (std::string)message["key"];
-                const auto roles = store->GetData("Roles");
+                const auto roles = store->GetData({"Roles"}, {});
                 if (roles.Has(identifier)) {
                     AddIdentifier(identifier);
                 } else {
@@ -141,7 +141,7 @@ namespace {
                             "twitch:%" PRIdMAX,
                             twitchId
                         );
-                        const auto roles = self.store->GetData("Roles");
+                        const auto roles = self.store->GetData({"Roles"}, {});
                         self.AddIdentifier(identifier);
                         self.OnAuthenticated();
                     },
@@ -199,7 +199,7 @@ namespace {
                 "Opened"
             );
             std::weak_ptr< Client > selfWeak(shared_from_this());
-            const auto configuration = store->GetData("Configuration");
+            const auto configuration = store->GetData({"Configuration"}, {});
             authenticationTimeout = scheduler->Schedule(
                 [
                     selfWeak
@@ -383,7 +383,7 @@ struct ApiWs::Impl
         clientsEntry->second->OnClosed(code, reason);
         clientsEntry->second = nullptr;
         const auto thisGeneration = generation;
-        const auto configuration = store->GetData("Configuration");
+        const auto configuration = store->GetData({"Configuration"}, {});
         const auto webSocketCloseLinger = (double)configuration["WebSocketCloseLinger"];
         std::weak_ptr< WebSockets::WebSocket > wsWeak(ws);
         std::weak_ptr< Impl > implWeak(shared_from_this());

@@ -82,11 +82,12 @@ namespace {
     #undef HANDLER_METHODS
     #undef HANDLER_PATH
     #define HANDLER_METHODS {"GET"}
-    #define HANDLER_PATH {"test"}
+    #define HANDLER_PATH {"data"}
     DEFINE_HANDLER(Test){
-        return Json::Object({
-            {"message", "Hello, World!"},
-        });
+        return store->GetData(
+            request.target.GetPath(),
+            {"public"}
+        );
     }
 
     #undef DEFINE_HANDLER

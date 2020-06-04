@@ -12,15 +12,56 @@
 #include <Timekeeping/Scheduler.hpp>
 #include <StringExtensions/StringExtensions.hpp>
 #include <SystemAbstractions/DiagnosticsSender.hpp>
+#include <unordered_set>
 
 namespace {
 
     constexpr double defaultMinSaveInterval = 60.0;
 
+    struct RolesPermitted {
+        std::unordered_set< std::string > readData;
+        std::unordered_set< std::string > readMeta;
+        std::unordered_set< std::string > writeData;
+        std::unordered_set< std::string > writeMeta;
+        std::unordered_set< std::string > createData;
+        std::unordered_set< std::string > deleteData;
+    };
+
+    // Forward declaractions
+    Json::Value ExtractData(
+        const RolesPermitted& rolesPermitted,
+        const Json::Value& root,
+        const std::unordered_set< std::string >& rolesHeld
+    );
+    bool RolePermitted(
+        const std::unordered_set< std::string >& lhs,
+        const std::unordered_set< std::string >& rhs
+    );
+    void UpdateRoles(
+        RolesPermitted& rolesPermitted,
+        const Json::Value& meta
+    );
+
+    void AddRoles(
+        std::unordered_set< std::string >& rolesSet,
+        const Json::Value& rolesArray
+    ) {
+        if (rolesArray.GetType() != Json::Value::Type::Array) {
+            return;
+        }
+        for (const auto entry: rolesArray) {
+            const auto& role = entry.value();
+            (void)rolesSet.insert(role);
+        }
+    }
+
     /**
      * Return a reference to the JSON object containing the key at
-     * the given "path".  The path consists of JSON object keys separated
-     * by dots.
+     * the given "path".  The path consists of JSON object keys.
+     *
+     * @param[in,out] rolesPermitted
+     *     This tracks which roles are permitted to which operations
+     *     at the current level of the JSON composition.
      *
      * @param[in] root
      *     This is the top-level JSON object in which to find a
@@ -31,67 +72,167 @@ namespace {
      *     tree.
      *
      * @param[in] offset
-     *     This is the number of characters to skip in `path`.
+     *     This is the index of the next path element.
      *
      * @return
      *     A reference to the "descendant" JSON object containing the
      *     last key in the given sequence is returned.
      */
     const Json::Value& DescendTree(
+        RolesPermitted& rolesPermitted,
         const Json::Value& root,
-        const std::string& path,
+        const std::vector< std::string >& path,
         size_t offset = 0
     ) {
-        if (offset >= path.length()) {
+        if (offset >= path.size()) {
             return root;
         }
-        auto delimiter = path.find('.', offset);
-        if (delimiter == std::string::npos) {
-            delimiter = path.length();
-        }
-        const auto key = path.substr(offset, delimiter - offset);
+        const auto& key = path[offset];
         if (root.Has("data")) {
-            return DescendTree(root["data"][key], path, delimiter + 1);
+            UpdateRoles(rolesPermitted, root["meta"]);
+            return DescendTree(rolesPermitted, root["data"][key], path, offset + 1);
         } else {
-            return DescendTree(root[key], path, delimiter + 1);
+            return DescendTree(rolesPermitted, root[key], path, offset + 1);
         }
     }
 
-    // Forward declaraction
-    Json::Value ExtractData(const Json::Value& root);
-
-    Json::Value ExtractDataNoMeta(const Json::Value& root) {
+    Json::Value ExtractDataNoMeta(
+        const RolesPermitted& rolesPermitted,
+        const Json::Value& root,
+        const std::unordered_set< std::string >& rolesHeld
+    ) {
         switch (root.GetType()) {
             case Json::Value::Type::Array: {
-                auto data = Json::Array({});
-                for (const auto entry: root) {
-                    data.Add(ExtractData(entry.value()));
+                if (RolePermitted(rolesPermitted.readData, rolesHeld)) {
+                    auto data = Json::Array({});
+                    for (const auto entry: root) {
+                        auto element = ExtractData(rolesPermitted, entry.value(), rolesHeld);
+                        if (element.GetType() != Json::Value::Type::Invalid) {
+                            data.Add(std::move(element));
+                        }
+                    }
+                    return data;
+                } else {
+                    return Json::Value();
                 }
-                return data;
             }
 
             case Json::Value::Type::Object: {
                 auto data = Json::Object({});
+                bool empty = true;
                 for (const auto entry: root) {
-                    data[entry.key()] = ExtractData(entry.value());
+                    auto element = ExtractData(rolesPermitted, entry.value(), rolesHeld);
+                    if (element.GetType() != Json::Value::Type::Invalid) {
+                        data[entry.key()] = std::move(element);
+                        empty = false;
+                    }
                 }
-                return data;
+                if (
+                    RolePermitted(rolesPermitted.readData, rolesHeld)
+                    || !empty
+                ) {
+                    return data;
+                } else {
+                    return Json::Value();
+                }
             }
 
-            default: return root;
+            default: {
+                if (RolePermitted(rolesPermitted.readData, rolesHeld)) {
+                    return root;
+                } else {
+                    return Json::Value();
+                }
+            }
         }
     }
 
-    Json::Value ExtractData(const Json::Value& root) {
+    Json::Value ExtractData(
+        const RolesPermitted& rolesPermitted,
+        const Json::Value& root,
+        const std::unordered_set< std::string >& rolesHeld
+    ) {
         if (
             (root.GetType() == Json::Value::Type::Object)
             && root.Has("data")
         ) {
-            return ExtractDataNoMeta(root["data"]);
+            auto innerRolesPermitted = rolesPermitted;
+            UpdateRoles(innerRolesPermitted, root["meta"]);
+            return ExtractDataNoMeta(innerRolesPermitted, root["data"], rolesHeld);
         }
-        return ExtractDataNoMeta(root);
+        return ExtractDataNoMeta(rolesPermitted, root, rolesHeld);
     }
 
+    bool RolePermitted(
+        const std::unordered_set< std::string >& rolesPermitted,
+        const std::unordered_set< std::string >& rolesHeld
+    ) {
+        if (rolesHeld.empty()) {
+            return true;
+        }
+        for (const auto& role: rolesPermitted) {
+            if (rolesHeld.find(role) != rolesHeld.end()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void UpdateRoles(
+        RolesPermitted& rolesPermitted,
+        const Json::Value& meta
+    ) {
+        if (meta.Has("require")) {
+            const auto& require = meta["require"];
+            if (require.Has("read_data")) {
+                rolesPermitted.readData.clear();
+                AddRoles(rolesPermitted.readData, require["read_data"]);
+            }
+            if (require.Has("read_meta")) {
+                rolesPermitted.readMeta.clear();
+                AddRoles(rolesPermitted.readMeta, require["read_meta"]);
+            }
+            if (require.Has("write_data")) {
+                rolesPermitted.writeData.clear();
+                AddRoles(rolesPermitted.writeData, require["write_data"]);
+            }
+            if (require.Has("write_meta")) {
+                rolesPermitted.writeMeta.clear();
+                AddRoles(rolesPermitted.writeMeta, require["write_meta"]);
+            }
+            if (require.Has("create_data")) {
+                rolesPermitted.createData.clear();
+                AddRoles(rolesPermitted.createData, require["create"]);
+            }
+            if (require.Has("delete_data")) {
+                rolesPermitted.deleteData.clear();
+                AddRoles(rolesPermitted.deleteData, require["delete"]);
+            }
+        }
+        if (meta.Has("allow")) {
+            const auto& allow = meta["allow"];
+            if (allow.Has("read_data")) {
+                AddRoles(rolesPermitted.readData, allow["read_data"]);
+            }
+            if (allow.Has("read_meta")) {
+                AddRoles(rolesPermitted.readMeta, allow["read_meta"]);
+            }
+            if (allow.Has("write_data")) {
+                AddRoles(rolesPermitted.readData, allow["write_data"]);
+                AddRoles(rolesPermitted.writeData, allow["write_data"]);
+            }
+            if (allow.Has("write_meta")) {
+                AddRoles(rolesPermitted.readMeta, allow["write_meta"]);
+                AddRoles(rolesPermitted.writeMeta, allow["write_meta"]);
+            }
+            if (allow.Has("create_data")) {
+                AddRoles(rolesPermitted.createData, allow["create"]);
+            }
+            if (allow.Has("delete_data")) {
+                AddRoles(rolesPermitted.deleteData, allow["delete"]);
+            }
+        }
+    }
 }
 
 struct Store::Impl
@@ -120,9 +261,18 @@ struct Store::Impl
 
     // Methods
 
-    Json::Value GetData(const std::string& path) {
-        const auto& root = DescendTree(store, path);
-        return ExtractData(root);
+    Json::Value GetData(
+        const std::vector< std::string >& path,
+        const std::unordered_set< std::string >& rolesHeld
+    ) {
+        RolesPermitted rolesPermitted;
+        const auto& root = DescendTree(rolesPermitted, store, path);
+        auto data = ExtractData(rolesPermitted, root, rolesHeld);
+        if (data.GetType() == Json::Value::Type::Invalid) {
+            return nullptr;
+        } else {
+            return data;
+        }
     }
 
     void Save() {
@@ -192,9 +342,12 @@ void Store::Demobilize() {
     impl_->mobilized = false;
 }
 
-Json::Value Store::GetData(const std::string& path) {
+Json::Value Store::GetData(
+    const std::vector< std::string >& path,
+    const std::unordered_set< std::string >& rolesHeld
+) {
     std::lock_guard< decltype(impl_->mutex) > lock(impl_->mutex);
-    return impl_->GetData(path);
+    return impl_->GetData(path, rolesHeld);
 }
 
 SystemAbstractions::DiagnosticsSender::UnsubscribeDelegate Store::SubscribeToDiagnostics(
@@ -237,7 +390,7 @@ bool Store::Mobilize(
         "Loaded from file '%s'",
         filePath.c_str()
     );
-    const auto configuration = impl_->GetData("Configuration");
+    const auto configuration = impl_->GetData({"Configuration"}, {});
     if (configuration.Has("MinSaveInterval")){
         impl_->minSaveInterval = configuration["MinSaveInterval"];
     } else {

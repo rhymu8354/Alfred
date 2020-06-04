@@ -11,6 +11,8 @@
 #include <string>
 #include <SystemAbstractions/DiagnosticsSender.hpp>
 #include <Timekeeping/Clock.hpp>
+#include <unordered_set>
+#include <vector>
 
 /**
  * This object manages all the data (and its metadata) that Alfred holds
@@ -33,7 +35,10 @@ public:
 public:
     void Demobilize();
 
-    Json::Value GetData(const std::string& path);
+    Json::Value GetData(
+        const std::vector< std::string >& path,
+        const std::unordered_set< std::string >& rolesHeld
+    );
 
     /**
      * This method forms a new subscription to diagnostic

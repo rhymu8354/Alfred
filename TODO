@@ -1,12 +1,17 @@
 ☐ Establish Permissions: @created(2020-05-15 00:14)
     * Read data
     * Read metadata
-    * Write data
-    * Write metadata
+    * Write data (includes read)
+    * Write metadata (includes read)
     * Create (includes pushing, unshifting)
     * Delete (includes shifting, popping)
 ✔ Establish the service @created(2020-04-27 17:06) @done(2020-06-03 12:46)
 ✔ Add Twitch OAuth token authentication mechanism @created(2020-06-03 14:32) @done(2020-06-03 16:49)
+✔ Add ability to read store via HTTP @created(2020-06-03 17:28) @done(2020-06-03 19:46)
+☐ Add ability to read store via WebSocket @created(2020-06-03 17:29)
+☐ Add ability to write store via WebSocket @created(2020-06-03 17:29)
+☐ Add ability to add to store via WebSocket @created(2020-06-03 17:29)
+☐ Add ability to remove from store via WebSocket @created(2020-06-03 17:29)
 ☐ Use OIDC Code flow to get (and refresh) OAuth token @created(2020-04-27 22:06)
 ☐ Interact with Twitch pub/sub to receive events @created(2020-04-27 22:03)
     ☐ Bits @created(2020-04-27 22:13)
@@ -22,4 +27,4 @@
     ☐ Raids @created(2020-04-27 22:03)
     ☐ VIP added/removed @created(2020-04-27 22:04)
         NOTE: The only way it seems this can be detected is when people actually chat, and looking at their badges to see if they have the VIP badge.
-☐ Exchange of Twitch JWT for token @created(2020-04-27 22:01)
+✘ Exchange of Twitch JWT for token @created(2020-04-27 22:01) @cancelled(2020-06-03 17:27)
