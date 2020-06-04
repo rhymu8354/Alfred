@@ -71,6 +71,7 @@ namespace {
         std::unordered_set< std::string > roles;
         std::shared_ptr< Timekeeping::Scheduler > scheduler;
         std::shared_ptr< Store > store;
+        std::shared_ptr< std::vector< std::string > > subscriptionPath;
         std::weak_ptr< WebSockets::WebSocket > wsWeak;
 
         // Constructor
@@ -227,6 +228,24 @@ namespace {
             );
         }
 
+        DEFINE_MESSAGE_HANDLER(OnSubscribe) {
+            const auto& path = message["path"];
+            if (path.GetType() != Json::Value::Type::Array) {
+                return;
+            }
+            subscriptionPath = std::make_shared< std::vector< std::string > >();
+            for (const auto pathElement: path) {
+                subscriptionPath->push_back(pathElement.value());
+            }
+            const auto ws = wsWeak.lock();
+            if (ws != nullptr) {
+                ws->SendText(Json::Object({
+                    {"type", "Data"},
+                    {"data", store->GetData(*subscriptionPath, roles)},
+                }).ToEncoding());
+            }
+        }
+
         void OnText(const std::string& data) {
             std::unique_lock< decltype(mutex) > lock(mutex);
             diagnosticsSender.SendDiagnosticInformationFormatted(
@@ -332,6 +351,7 @@ namespace {
 
     const std::unordered_map< std::string, Client::MessageHandler > Client::messageHandlers{
         {"Authenticate", &Client::OnAuthenticate},
+        {"Subscribe", &Client::OnSubscribe},
     };
 
 }
