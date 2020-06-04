@@ -372,8 +372,6 @@ struct Service::Impl
         };
         transport->SetConnectionDecoratorFactory(connectionDecoratorFactory);
         httpDeps.transport = transport;
-        httpServer->SetConfigurationItem("Port", "8100");
-        httpServer->SetConfigurationItem("TooManyRequestsThreshold", "0.0");
         const auto& httpConfig = configuration["Http"];
         if (httpConfig.GetType() == Json::Value::Type::Object) {
             for (const auto keyValue: httpConfig) {
@@ -588,7 +586,7 @@ struct Service::Impl
      *     prepared for running is returned.
      */
     bool SetUp() {
-        const auto configuration = store->GetData("Configuration");
+        const auto configuration = store->GetData({"Configuration"}, {});
         httpServer = std::make_shared< Http::Server >();
         if (!ConfigureAndStartHttpServer(configuration)) {
             httpServer = nullptr;
@@ -676,7 +674,7 @@ int Service::Main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
     unsubscribeDiagnosticsDelegate();
-    const auto configuration = impl_->store->GetData("Configuration");
+    const auto configuration = impl_->store->GetData({"Configuration"}, {});
     if (configuration.Has("LogFile")) {
         impl_->environment.logFilePath = (std::string)configuration["LogFile"];
     }
