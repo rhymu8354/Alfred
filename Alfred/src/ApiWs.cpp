@@ -159,6 +159,7 @@ namespace {
         }
 
         void OnAuthenticated() {
+            AddRole("public");
             diagnosticsSender.SendDiagnosticInformationFormatted(
                 2,
                 "Authenticated, identifiers: %s; roles: %s",
