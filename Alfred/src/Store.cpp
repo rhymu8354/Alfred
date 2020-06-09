@@ -158,7 +158,14 @@ namespace {
         ) {
             auto innerRolesPermitted = rolesPermitted;
             UpdateRoles(innerRolesPermitted, root["meta"]);
-            return ExtractDataNoMeta(innerRolesPermitted, root["data"], rolesHeld);
+            if (RolePermitted(innerRolesPermitted.readMeta, rolesHeld)) {
+                return Json::Object({
+                    {"data", ExtractDataNoMeta(innerRolesPermitted, root["data"], rolesHeld)},
+                    {"meta", ExtractDataNoMeta(innerRolesPermitted, root["meta"], rolesHeld)},
+                });
+            } else {
+                return ExtractDataNoMeta(innerRolesPermitted, root["data"], rolesHeld);
+            }
         }
         return ExtractDataNoMeta(rolesPermitted, root, rolesHeld);
     }
