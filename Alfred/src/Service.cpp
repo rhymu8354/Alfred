@@ -670,15 +670,23 @@ int Service::Main(int argc, char* argv[]) {
         PrintUsageInformation();
         return EXIT_FAILURE;
     }
+    auto unsubscribeFromStore = impl_->store->SubscribeToDiagnostics(
+        impl_->diagnosticsSender.Chain()
+    );
     if (!impl_->LoadStore()) {
         return EXIT_FAILURE;
     }
+    unsubscribeFromStore();
     unsubscribeDiagnosticsDelegate();
     const auto configuration = impl_->store->GetData({"Configuration"}, {});
     if (configuration.Has("LogFile")) {
         impl_->environment.logFilePath = (std::string)configuration["LogFile"];
     }
     impl_->diagnosticReportingThresholds = configuration["DiagnosticReportingThresholds"];
+    (void)impl_->store->SubscribeToDiagnostics(
+        impl_->diagnosticsSender.Chain(),
+        impl_->diagnosticReportingThresholds["Store"]
+    );
     if (impl_->environment.daemon) {
         std::shared_ptr< FILE > logFile(
             fopen(impl_->environment.logFilePath.c_str(), "a"),
