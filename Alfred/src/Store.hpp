@@ -6,6 +6,7 @@
  * This module declares the Store implementation.
  */
 
+#include <functional>
 #include <Json/Value.hpp>
 #include <memory>
 #include <string>
@@ -19,6 +20,10 @@
  * and distributes to clients.
  */
 class Store {
+    // Types
+public:
+    using OnUpdate = std::function< void(Json::Value&& data) >;
+
     // Lifecycle Methods
 public:
     ~Store() noexcept;
@@ -38,6 +43,12 @@ public:
     Json::Value GetData(
         const std::vector< std::string >& path,
         const std::unordered_set< std::string >& rolesHeld
+    );
+
+    std::function< void() > SubscribeToData(
+        const std::vector< std::string >& path,
+        const std::unordered_set< std::string >& rolesHeld,
+        OnUpdate onUpdate
     );
 
     /**

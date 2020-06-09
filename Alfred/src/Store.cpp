@@ -12,6 +12,7 @@
 #include <Timekeeping/Scheduler.hpp>
 #include <StringExtensions/StringExtensions.hpp>
 #include <SystemAbstractions/DiagnosticsSender.hpp>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace {
@@ -245,6 +246,14 @@ namespace {
 struct Store::Impl
     : public std::enable_shared_from_this< Store::Impl >
 {
+    // Types
+
+    struct Subscription {
+        std::vector< std::string > path;
+        std::unordered_set< std::string > rolesHeld;
+        OnUpdate onUpdate;
+    };
+
     // Properties
 
     SystemAbstractions::DiagnosticsSender diagnosticsSender;
@@ -255,9 +264,11 @@ struct Store::Impl
     std::mutex mutex;
     double nextSaveTime = 0.0;
     int nextSaveToken = 0;
+    int nextSubscriptionToken = 1;
     bool saving = false;
     Json::Value store;
     Timekeeping::Scheduler scheduler;
+    std::unordered_map< int, Subscription > subscribers;
 
     // Constructor
 
@@ -321,6 +332,29 @@ struct Store::Impl
         );
         nextSaveTime += minSaveInterval;
     }
+
+    std::function< void() > SubscribeToData(
+        const std::vector< std::string >& path,
+        const std::unordered_set< std::string >& rolesHeld,
+        OnUpdate onUpdate,
+        std::unique_lock< std::mutex >& lock
+    ) {
+        const auto subscriptionToken = nextSubscriptionToken++;
+        subscribers[subscriptionToken] = { path, rolesHeld, onUpdate };
+        auto data = GetData(path, rolesHeld);
+        lock.unlock();
+        onUpdate(std::move(data));
+        lock.lock();
+        std::weak_ptr< Impl > selfWeak(shared_from_this());
+        return [selfWeak, subscriptionToken]{
+            const auto self = selfWeak.lock();
+            if (self == nullptr) {
+                return;
+            }
+            std::lock_guard< decltype(self->mutex) > lock(self->mutex);
+            (void)self->subscribers.erase(subscriptionToken);
+        };
+    }
 };
 
 Store::~Store() noexcept {
@@ -355,6 +389,15 @@ Json::Value Store::GetData(
 ) {
     std::lock_guard< decltype(impl_->mutex) > lock(impl_->mutex);
     return impl_->GetData(path, rolesHeld);
+}
+
+std::function< void() > Store::SubscribeToData(
+    const std::vector< std::string >& path,
+    const std::unordered_set< std::string >& rolesHeld,
+    std::function< void(Json::Value&& data) > onUpdate
+) {
+    std::unique_lock< decltype(impl_->mutex) > lock(impl_->mutex);
+    return impl_->SubscribeToData(path, rolesHeld, onUpdate, lock);
 }
 
 SystemAbstractions::DiagnosticsSender::UnsubscribeDelegate Store::SubscribeToDiagnostics(

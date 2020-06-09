@@ -72,7 +72,20 @@ namespace {
         std::shared_ptr< Timekeeping::Scheduler > scheduler;
         std::shared_ptr< Store > store;
         std::shared_ptr< std::vector< std::string > > subscriptionPath;
+        std::function< void() > unsubscribeFromStore;
         std::weak_ptr< WebSockets::WebSocket > wsWeak;
+
+        // Lifecycle
+
+        ~Client() {
+            if (unsubscribeFromStore != nullptr) {
+                unsubscribeFromStore();
+            }
+        }
+        Client(const Client&) = delete;
+        Client(Client&&) noexcept = delete;
+        Client& operator=(const Client&) = delete;
+        Client& operator=(Client&&) noexcept = delete;
 
         // Constructor
 
@@ -233,17 +246,29 @@ namespace {
             if (path.GetType() != Json::Value::Type::Array) {
                 return;
             }
-            subscriptionPath = std::make_shared< std::vector< std::string > >();
+            std::vector< std::string > subscriptionPath;
             for (const auto pathElement: path) {
-                subscriptionPath->push_back(pathElement.value());
+                subscriptionPath.push_back(pathElement.value());
             }
-            const auto ws = wsWeak.lock();
-            if (ws != nullptr) {
-                ws->SendText(Json::Object({
-                    {"type", "Data"},
-                    {"data", store->GetData(*subscriptionPath, roles)},
-                }).ToEncoding());
+            if (unsubscribeFromStore != nullptr) {
+                unsubscribeFromStore();
             }
+            const auto wsWeakCopy(wsWeak);
+            unsubscribeFromStore = store->SubscribeToData(
+                subscriptionPath,
+                roles,
+                [wsWeakCopy](
+                    Json::Value&& data
+                ){
+                    const auto ws = wsWeakCopy.lock();
+                    if (ws != nullptr) {
+                        ws->SendText(Json::Object({
+                            {"type", "Data"},
+                            {"data", std::move(data)},
+                        }).ToEncoding());
+                    }
+                }
+            );
         }
 
         void OnText(const std::string& data) {
